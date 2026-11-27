@@ -8,7 +8,7 @@
    Constants
    ========================================================================= */
 const STORE_KEY = 'tally.v1';
-const APP_VERSION = '1.5.0';
+const APP_VERSION = '1.6.0';
 
 const ACCOUNT_TYPES = {
   checking:   { label: 'Checking',    group: 'cash',   asset: true },
@@ -116,6 +116,7 @@ function freshState() {
       privacy: false,
       includeRetirement: false, // retirement stays out of net worth unless switched on
       pay: null,                 // { amount, freq } — take-home pay per paycheck
+      widget: { enabled: false, url: '', key: '', selected: [], showSynced: true, lastPush: null, lastError: null },
     },
   };
 }
@@ -126,6 +127,7 @@ function loadState() {
     const s = JSON.parse(raw);
     const base = freshState();
     const st = { ...base, ...s, settings: { ...base.settings, ...(s.settings || {}) } };
+    st.settings.widget = { ...base.settings.widget, ...(st.settings.widget || {}) };
     if (!st.reviewMigrated) {
       // Everything older than a week counts as already looked at.
       const cutoff = isoDate(new Date(Date.now() - 7 * 86400000));
@@ -142,6 +144,94 @@ function loadState() {
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
   catch (e) { toast('Could not save — device storage is full'); console.error(e); }
+  queueWidgetPush();
+}
+
+/* ---------- Home-screen widget (Scriptable) ---------- */
+// Sends a small summary — budget totals per category, nothing else — to your Cloudflare Worker.
+let widgetTimer = null;
+function widgetReady() { const w = state?.settings?.widget; return !!(w && w.enabled && w.url && w.key && !state.demo); }
+function queueWidgetPush() {
+  if (!widgetReady()) return;
+  clearTimeout(widgetTimer);
+  widgetTimer = setTimeout(() => pushWidget(), 3000);
+}
+function widgetSummary() {
+  const month = monthKey(new Date());
+  const { byCat } = monthSpending(month);
+  const cats = budgetCategories().map(c => ({ id: c.id, name: c.name, emoji: c.emoji, budget: round2(budgetFor(c.id, month)), spent: round2(byCat[c.id] || 0) }))
+    .filter(c => c.budget > 0 || c.spent > 0);
+  const budgeted = cats.reduce((a, c) => a + c.budget, 0);
+  const spent = Object.entries(byCat).reduce((a, [, v]) => a + v, 0);
+  const w = state.settings.widget;
+  return {
+    v: 1, month, monthLabel: new Date().toLocaleDateString('en-US', { month: 'long' }),
+    pushed: Date.now(), synced: state.settings.lastSync || null,
+    budgeted: round2(budgeted), spent: round2(spent), left: round2(budgeted - spent),
+    pace: new Date().getDate() / daysInMonth(),
+    showSynced: w.showSynced !== false,
+    selected: (w.selected || []).filter(id => cats.some(c => c.id === id)),
+    categories: cats,
+  };
+}
+async function pushWidget({ manual = false } = {}) {
+  const w = state.settings.widget;
+  if (!w.url || !w.key) { if (manual) toast('Add your worker URL and widget key first'); return; }
+  try {
+    const res = await fetch(w.url.replace(/\/$/, '') + '/summary', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json', 'X-Tally-Key': w.key }, body: JSON.stringify(widgetSummary()),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(body.error || `Worker returned ${res.status}`);
+    w.lastPush = Date.now(); w.lastError = null;
+    if (manual) toast('Widget updated');
+  } catch (e) {
+    w.lastError = e.message === 'Failed to fetch' ? 'Couldn’t reach the worker — check the URL and that ALLOWED_ORIGIN matches this site.' : e.message;
+    if (manual) toast(w.lastError);
+  }
+  try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); } catch {}
+  if (ui.settingsOpen) render();
+}
+function newWidgetKey() {
+  const b = new Uint8Array(18); crypto.getRandomValues(b);
+  return Array.from(b, x => x.toString(16).padStart(2, '0')).join('');
+}
+async function copyWidgetScript() {
+  const w = state.settings.widget;
+  if (!w.url || !w.key) return toast('Add your worker URL and widget key first');
+  try {
+    const tpl = await (await fetch('widget/tally-widget.js', { cache: 'no-store' })).text();
+    const appUrl = location.href.split('#')[0].split('?')[0];
+    const script = tpl.replace('__WORKER_URL__', w.url.replace(/\/$/, '')).replace('__WIDGET_KEY__', w.key).replace('__TALLY_URL__', appUrl);
+    await navigator.clipboard.writeText(script);
+    toast('Widget script copied — paste it into a new Scriptable script');
+  } catch (e) { toast('Couldn’t copy the script: ' + e.message); }
+}
+function widgetSettingsCard() {
+  const w = state.settings.widget;
+  const cats = budgetCategories();
+  const sel = w.selected || [];
+  return `<section class="card">
+    <details ${ui.widgetOpen ? 'open' : ''} id="widget-details">
+      <summary class="card-head" style="cursor:pointer;list-style:none"><h2>📱 Home-screen widget</h2><span class="pill">${w.enabled ? (w.lastError ? '⚠︎ Error' : w.lastPush ? 'Updated ' + timeAgo(w.lastPush) : 'On') : 'Off'}</span></summary>
+      <p class="faint">Shows what’s left in your budget on your iPhone home screen, using the free <a href="https://apps.apple.com/app/scriptable/id1405459188" target="_blank" rel="noopener">Scriptable</a> app. Tally sends only your budget totals to your own Cloudflare Worker — no transactions or account details.</p>
+      ${w.lastError ? `<div class="note warn">${esc(w.lastError)}</div>` : ''}
+      <label class="check"><input type="checkbox" id="wg-enabled" ${w.enabled ? 'checked' : ''}> Send my budget to the widget</label>
+      <label class="field"><span>Worker URL</span><input class="input" id="wg-url" placeholder="https://tally-proxy.yourname.workers.dev" value="${esc(w.url || state.settings.proxy || '')}"></label>
+      <label class="field"><span>Widget key</span>
+        <div class="row"><input class="input" id="wg-key" value="${esc(w.key)}" placeholder="Generate one →" style="font-family:ui-monospace,monospace;font-size:12px"><button class="btn small" style="flex:0 0 auto" data-act="wg-genkey">Generate</button><button class="btn small" style="flex:0 0 auto" data-act="wg-copykey">Copy</button></div>
+      </label>
+      <label class="check"><input type="checkbox" id="wg-synced" ${w.showSynced !== false ? 'checked' : ''}> Show “last synced” on the widget</label>
+      <div class="field"><span>Categories on the widget <span class="faint">(medium shows the first 4, large the first 8 — in the order you tick them)</span></span>
+        <div class="wg-cats">${cats.map(c => { const i = sel.indexOf(c.id); return `<button type="button" class="cat-opt ${i >= 0 ? 'active' : ''}" data-act="wg-cat" data-id="${c.id}">${i >= 0 ? `<b>${i + 1}</b> ` : ''}${c.emoji} ${esc(c.name)}</button>`; }).join('')}</div>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" data-act="wg-save">Save & update widget</button>
+        <button class="btn" data-act="wg-copyscript">Copy widget script</button>
+      </div>
+      <p class="faint" style="margin-top:10px">The widget refreshes every 30–60 minutes (iOS decides exactly when) and shows what Tally knew the last time you opened it.</p>
+    </details>
+  </section>`;
 }
 
 /* =========================================================================
@@ -1329,6 +1419,8 @@ function renderSettings() {
         </div>`).join('') : '<p class="faint">No accounts yet.</p>'}
     </section>
 
+    ${widgetSettingsCard()}
+
     <section class="card">
       <div class="card-head"><h2>Import a CSV statement</h2></div>
       <p class="faint">Works with Apple Card exports and any bank’s CSV download. Duplicates are skipped.</p>
@@ -1779,6 +1871,22 @@ document.addEventListener('click', async e => {
     case 'sf-disconnect':
       if (!confirmInline('Disconnect SimpleFIN? Your existing accounts and transactions stay here. You can also revoke Tally’s access in SimpleFIN Bridge.')) return;
       state.settings.sfAccess = null; state.settings.lastSync = null; state.settings.lastSyncError = null; save(); render(); break;
+    case 'wg-genkey': {
+      if ($('#wg-key').value && !confirmInline('Make a new key? You’ll need to update it on the worker and re-copy the widget script.')) return;
+      $('#wg-key').value = newWidgetKey(); break;
+    }
+    case 'wg-copykey': {
+      const k = $('#wg-key').value.trim(); if (!k) return toast('Generate a key first');
+      try { await navigator.clipboard.writeText(k); toast('Key copied — paste it as WIDGET_KEY on the worker'); } catch { $('#wg-key').select(); toast('Select and copy the key'); }
+      break;
+    }
+    case 'wg-cat': {
+      const w = state.settings.widget; w.selected ||= [];
+      const i = w.selected.indexOf(id); i >= 0 ? w.selected.splice(i, 1) : w.selected.push(id);
+      readWidgetForm(); ui.widgetOpen = true; save(); render(); break;
+    }
+    case 'wg-save': readWidgetForm(); ui.widgetOpen = true; save(); if (state.settings.widget.enabled) pushWidget({ manual: true }); else render(); break;
+    case 'wg-copyscript': readWidgetForm(); save(); copyWidgetScript(); break;
     case 'save-sync-settings':
       state.settings.proxy = $('#sf-proxy').value.trim();
       state.settings.autoSyncHours = +$('#sf-interval').value;
@@ -1822,6 +1930,7 @@ document.addEventListener('input', e => {
     const inp = $('[data-input="txn-search"]'); inp.focus(); inp.setSelectionRange(pos, pos);
   }
 });
+document.addEventListener('toggle', e => { if (e.target.id === 'widget-details') ui.widgetOpen = e.target.open; }, true);
 document.addEventListener('change', e => {
   if (e.target.dataset.input === 'txn-account') { ui.txnAccount = e.target.value; ui.txnLimit = 150; render(); }
   if (e.target.id === 'csv-file' && e.target.files[0]) { openCSVImport(e.target.files[0]); e.target.value = ''; }
@@ -1835,6 +1944,14 @@ $('#btn-privacy').addEventListener('click', () => {
   toast(state.settings.privacy ? 'Amounts hidden' : 'Amounts shown');
 });
 
+function readWidgetForm() {
+  const w = state.settings.widget;
+  if (!$('#wg-url')) return;
+  w.enabled = $('#wg-enabled').checked;
+  w.url = $('#wg-url').value.trim();
+  w.key = $('#wg-key').value.trim();
+  w.showSynced = $('#wg-synced').checked;
+}
 function exportBackup() {
   const copy = JSON.parse(JSON.stringify(state));
   const keep = confirmInline('Include your SimpleFIN connection in the backup?\n\nOK = include (anyone with the file could read your transactions)\nCancel = leave it out (you’d reconnect after restoring)');

@@ -47,3 +47,40 @@ The same importer works for any bank's CSV download.
 - Use **⚙ → Download backup** now and then. Clearing browser data would erase it.
 - The SimpleFIN access URL works like a password for reading your transactions. It's stored only on the device. The backup asks before including it.
 - The 👁 button blurs every amount, which is handy in public.
+
+## Home-screen widget (iPhone, via Scriptable)
+The widget shows what's left in this month's budget, with a ring for each category you pick. Tapping it opens Tally.
+
+Tally sends a small summary (budget totals per category, plus when it last synced) to **your own** Cloudflare Worker. No transactions or account details are sent. The widget reads that summary, so it shows what Tally knew the last time you opened it.
+
+**1. Worker (one time, ~10 minutes)**
+1. dash.cloudflare.com → Workers & Pages → Create → *Hello World* worker. If you already made the sync proxy, reuse that worker.
+2. **Edit code** → paste `proxy/simplefin-proxy.js` → check that `ALLOWED_ORIGIN` is `https://peekmeek.github.io` → **Deploy**.
+3. **Storage & Databases → KV → Create namespace** called `tally`.
+4. Back on the worker: **Settings → Bindings → Add → KV namespace**, variable name `TALLY_KV`, namespace `tally`.
+5. In Tally: ⚙ → **Home-screen widget** → **Generate** a key → **Copy**.
+6. Worker **Settings → Variables and Secrets → Add → Secret**, name `WIDGET_KEY`, value = the key → **Deploy**.
+
+**2. Tally**
+⚙ → Home-screen widget:
+1. Tick **Send my budget to the widget**.
+2. Paste the worker URL.
+3. Tap the categories to show, in the order you want them. Medium shows the first 4, large the first 8.
+4. Choose whether to show "last synced".
+5. Tap **Save & update widget**.
+
+**3. iPhone**
+1. Install **Scriptable** from the App Store.
+2. In Tally on your phone: ⚙ → Home-screen widget → **Copy widget script**.
+3. Scriptable → **+** → paste → rename it "Tally" → Done.
+4. Long-press the home screen → **Edit → Add Widget → Scriptable** → pick a size → Add.
+5. Long-press the new widget → **Edit Widget** → Script: **Tally**, When Interacting: **Open URL**.
+
+**Changing categories:** do it in Tally. Alternatively, run the Tally script inside Scriptable and choose **Choose categories**; that choice only affects the widget and overrides Tally's. You can also type names in the widget's **Parameter** field, e.g. `Groceries, Shopping, Mortgage, Gas`, which overrides both.
+
+**Sizes:**
+- Small: total left with a progress bar.
+- Medium: total left plus 4 category rings.
+- Large: total left, an overall bar and up to 8 rings.
+
+Ring colors: green = on pace, orange = spending faster than the month, red = over budget.

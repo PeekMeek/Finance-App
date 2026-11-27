@@ -353,3 +353,7 @@ body.wide main { max-width: 1280px; }
 .ex-row { display: grid; grid-template-columns: 8px 1fr auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); cursor: pointer; }
 .ex-row:first-of-type { border-top: 0; }
 .ex-dot { width: 7px; height: 7px; border-radius: 50%; }
+
+.wg-cats { display: flex; flex-wrap: wrap; gap: 6px; }
+.wg-cats .cat-opt b { display: inline-grid; place-items: center; width: 18px; height: 18px; border-radius: 50%; background: var(--accent); color: #fff; font-size: 11px; margin-right: 2px; }
+details > summary::-webkit-details-marker { display: none; }
