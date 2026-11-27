@@ -8,7 +8,7 @@
    Constants
    ========================================================================= */
 const STORE_KEY = 'tally.v1';
-const APP_VERSION = '1.0.0';
+const APP_VERSION = '1.2.0';
 
 const ACCOUNT_TYPES = {
   checking:   { label: 'Checking',    group: 'cash',   asset: true },
@@ -110,6 +110,8 @@ function freshState() {
       lastSync: null,
       lastSyncError: null,
       privacy: false,
+      includeRetirement: false, // retirement stays out of net worth unless switched on
+      pay: null,                 // { amount, freq } — take-home pay per paycheck
     },
   };
 }
@@ -231,8 +233,12 @@ function totals() {
     else t[g] += a.balance;
   }
   t.assets = t.cash + t.retire + t.invest + t.other;
-  t.nw = t.assets - t.debt;
+  t.nwAll = t.assets - t.debt;
+  t.nw = state.settings.includeRetirement ? t.nwAll : t.nwAll - t.retire;
   return t;
+}
+function snapNW(s) {
+  return (s.cash || 0) + (s.invest || 0) + (s.other || 0) - (s.debt || 0) + (state.settings.includeRetirement ? (s.retire || 0) : 0);
 }
 function takeSnapshot() {
   if (!state.accounts.length) return;
@@ -311,7 +317,7 @@ async function sfFetchAccounts(startTs) {
 function guessType(name, orgName, balance) {
   const s = `${name} ${orgName}`.toLowerCase().replace(/credit union|federal credit/g, 'cu');
   const n = name.toLowerCase();
-  if (/401\s*\(?k|403\s*\(?b|457|\bira\b|roth|retire|pension|tsp|\bsep\b|simple ira/.test(s)) return 'retirement';
+  if (/401\s*\(?k|403\s*\(?b|457|\bira\b|roth|retire|pension|tsp|\bsep\b|simple ira|savings plan|thrift plan|alight|july services|july business|empower|netbenefits|voya|transamerica|tiaa|ascensus|principal financial|guideline|human interest|vanguard retirement/.test(s)) return 'retirement';
   if (/brokerage|invest|individual|stock|hsa|529/.test(s)) return 'investment';
   if (/mortgage|loan|heloc|line of credit/.test(n)) return 'loan';
   if (/checking|share draft|spend/.test(n)) return 'checking';
@@ -363,6 +369,7 @@ function mergeSimpleFIN(data, windowStart) {
       state.accounts.push(a);
     }
     a.name = sa.name; a.org = orgName;
+    if (!a.typeLocked) a.type = guessType(sa.name, orgName, balance);
     a.balance = balance;
     a.available = sa['available-balance'] != null ? Number(sa['available-balance']) : null;
     a.balanceDate = sa['balance-date'] ? sa['balance-date'] * 1000 : Date.now();
@@ -684,8 +691,8 @@ function renderOverview() {
   const t = totals();
   const series = rangeSeries();
   const first = series[0];
-  const change = first ? t.nw - first.nw : 0;
-  const changePct = first && first.nw ? change / Math.abs(first.nw) * 100 : 0;
+  const change = first ? t.nw - snapNW(first) : 0;
+  const changePct = first && snapNW(first) ? change / Math.abs(snapNW(first)) * 100 : 0;
   const parts = [
     ['cash', t.cash], ['retire', t.retire], ['invest', t.invest], ['other', t.other],
   ].filter(([, v]) => v > 0);
@@ -698,12 +705,16 @@ function renderOverview() {
   return `
     <section class="card hero">
       <div class="card-head">
-        <span class="eyebrow">Net worth</span>
+        <span class="eyebrow">Net worth${state.settings.includeRetirement ? ' · incl. retirement' : ''}</span>
         <div class="range-tabs">${['1M', '3M', '1Y', 'All'].map(r => `<button data-range="${r}" class="${ui.range === r ? 'active' : ''}">${r}</button>`).join('')}</div>
       </div>
       <div class="big-number num">${money(t.nw, { cents: false })}</div>
       ${first ? `<div class="delta num ${change >= 0 ? 'pos' : 'neg'}">${change >= 0 ? '▲' : '▼'} ${money(Math.abs(change), { cents: false })} (${Math.abs(changePct).toFixed(1)}%) <span class="faint">over ${rangeLabel()}</span></div>` : `<div class="faint">History builds up as you sync</div>`}
-      <div class="spark">${sparkline(series.concat([{ nw: t.nw }]))}</div>
+      <div class="spark">${sparkline(series.map(x => ({ nw: snapNW(x) })).concat([{ nw: t.nw }]))}</div>
+      ${t.retire > 0 ? `<div class="retire-toggle">
+        <span class="faint">${state.settings.includeRetirement ? 'Includes' : 'Not including'} retirement <b class="num">${money(t.retire, { cents: false })}</b></span>
+        <button class="btn small" data-act="toggle-retire">${state.settings.includeRetirement ? 'Leave out' : 'Include'}</button>
+      </div>` : ''}
     </section>
 
     <section class="card">
@@ -714,7 +725,7 @@ function renderOverview() {
           ${parts.map(([g, v]) => `
             <div class="legend-item">
               <span class="sw" style="background:${GROUPS[g].color}"></span>
-              <div><div class="lbl">${GROUPS[g].label}</div><div class="pct">${(v / t.assets * 100).toFixed(1)}% of assets</div></div>
+              <div><div class="lbl">${GROUPS[g].label}</div><div class="pct">${(v / t.assets * 100).toFixed(1)}% of assets${g === 'retire' && !state.settings.includeRetirement ? ' · not in net worth' : ''}</div></div>
               <div class="num acct-bal">${money(v, { cents: false })}</div>
             </div>`).join('')}
           ${t.debt > 0 ? `
@@ -904,6 +915,7 @@ function renderBudget() {
       <div class="bar ${spent > budgeted ? 'over' : ''}" style="margin:14px 0 8px"><i style="width:${Math.min(100, budgeted ? spent / budgeted * 100 : 0)}%"></i>${isCurrent ? `<span class="tick" style="left:${monthPct * 100}%"></span>` : ''}</div>
       <div class="faint">Income this month: <b class="num pos">${money(income, { cents: false })}</b>${income ? ` · ${income - spent >= 0 ? 'kept' : 'short'} <b class="num">${money(Math.abs(income - spent), { cents: false })}</b>` : ''}</div>
     </section>
+    ${renderPayCard(budgeted)}
     ${unc > 0 ? `<div class="note warn">${money(unc, { cents: false })} of spending isn’t categorized yet. <button class="link-btn" data-act="show-uncat">Sort it</button></div>` : ''}
     ${groups.map(g => {
       const cats = state.categories.filter(c => c.group === g);
@@ -912,6 +924,107 @@ function renderBudget() {
       return `<section class="card"><div class="card-head"><div class="bgroup-title">${esc(g)}</div><span class="faint num">${money(gs, { cents: false })} / ${money(gb, { cents: false })}</span></div>${cats.map(catRow).join('')}</section>`;
     }).join('')}
     <button class="btn block" data-act="add-category">+ Add category</button>`;
+}
+
+/* ---------- Pay vs budget ---------- */
+const PAY_FREQ = {
+  weekly:      { label: 'Weekly',                 perYear: 52 },
+  biweekly:    { label: 'Every two weeks',        perYear: 26 },
+  semimonthly: { label: 'Twice a month (1st & 15th)', perYear: 24 },
+  monthly:     { label: 'Monthly',                perYear: 12 },
+};
+function payTotals() {
+  const p = state.settings.pay;
+  if (!p || !p.amount) return null;
+  const year = p.amount * PAY_FREQ[p.freq || 'biweekly'].perYear;
+  return { perCheck: p.amount, freq: p.freq || 'biweekly', year, month: year / 12 };
+}
+function goalsRemaining() { return state.goals.reduce((s, g) => s + Math.max(0, g.target - goalSaved(g)), 0); }
+function plannedGoalMonthly() { return state.goals.filter(g => g.target - goalSaved(g) > 0).reduce((s, g) => s + (g.monthly || 0), 0); }
+function fundedBy(remaining, perMonth) {
+  if (remaining <= 0) return 'all goals already reached';
+  if (perMonth <= 0) return 'never at this rate';
+  const n = Math.ceil(remaining / perMonth);
+  const d = new Date(); d.setMonth(d.getMonth() + n);
+  return `all goals funded by <b>${d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}</b> (${n} month${n === 1 ? '' : 's'})`;
+}
+function renderPayCard(budgeted) {
+  const pay = payTotals();
+  if (!pay) return `<section class="card">
+      <div class="card-head"><h2>💵 Take-home pay</h2></div>
+      <p class="faint">Add your net pay to see how much of it your budget uses and what’s left for goals.</p>
+      <button class="btn primary" data-act="edit-pay">Add my pay</button>
+    </section>`;
+  const left = pay.month - budgeted;
+  const planned = plannedGoalMonthly();
+  const remaining = goalsRemaining();
+  const usedPct = Math.min(100, budgeted / pay.month * 100);
+  // Scenario 1: every leftover dollar goes to goals. Scenario 2: only the planned monthly contributions do.
+  const s1Goals = Math.max(0, left), s1Free = Math.min(0, left);
+  const s2Goals = Math.max(0, Math.min(planned, left)), s2Free = left - s2Goals;
+  const goalBar = Math.max(0, Math.min(100 - usedPct, planned / pay.month * 100));
+  return `<section class="card">
+      <div class="card-head"><h2>💵 Take-home pay</h2><button class="btn small" data-act="edit-pay">Edit</button></div>
+      <div class="budget-summary">
+        <div><div class="k">Per paycheck</div><div class="v num">${money(pay.perCheck, { cents: false })}</div></div>
+        <div><div class="k">Per month</div><div class="v num">${money(pay.month, { cents: false })}</div></div>
+        <div><div class="k">Per year</div><div class="v num">${money(pay.year, { cents: false })}</div></div>
+      </div>
+      <div class="split-bar" style="height:12px;margin-top:16px">
+        <div style="width:${usedPct}%;background:var(--warn)"></div>
+        <div style="width:${goalBar}%;background:var(--accent)"></div>
+        <div style="flex:1;background:var(--surface-2)"></div>
+      </div>
+      <div class="pay-legend">
+        <span><i style="background:var(--warn)"></i>Budget <b class="num">${money(budgeted, { cents: false })}</b> · ${Math.round(budgeted / pay.month * 100)}%</span>
+        <span><i style="background:var(--accent)"></i>Planned goals <b class="num">${money(planned, { cents: false })}</b></span>
+        <span><i style="background:var(--surface-2)"></i>${left >= 0 ? 'Left after budget' : 'Budget exceeds pay by'} <b class="num ${left < 0 ? 'neg' : ''}">${money(Math.abs(left), { cents: false })}</b>/mo</span>
+      </div>
+      ${left < 0 ? `<div class="note warn" style="margin-top:12px">Your budget is ${money(-left, { cents: false })} a month more than your take-home pay.</div>` : `
+      <div class="scenarios">
+        <div class="scenario">
+          <div class="eyebrow">1 · All leftover into goals</div>
+          <div class="row2"><span>To goals</span><b class="num pos">${money(s1Goals, { cents: false })}/mo</b></div>
+          <div class="row2"><span>Free cash</span><b class="num">${money(s1Free, { cents: false })}/mo</b></div>
+          <div class="row2 faint"><span>Over a year</span><span class="num">${money(s1Goals * 12, { cents: false })} to goals</span></div>
+          <div class="faint" style="margin-top:6px">${state.goals.length ? fundedBy(remaining, s1Goals) : 'Add a goal to see when it’s funded'}</div>
+        </div>
+        <div class="scenario">
+          <div class="eyebrow">2 · Keep the leftover</div>
+          <div class="row2"><span>To goals</span><b class="num">${money(s2Goals, { cents: false })}/mo</b></div>
+          <div class="row2"><span>Free cash</span><b class="num pos">${money(s2Free, { cents: false })}/mo</b></div>
+          <div class="row2 faint"><span>Over a year</span><span class="num">${money(s2Free * 12, { cents: false })} kept</span></div>
+          <div class="faint" style="margin-top:6px">${state.goals.length ? (planned ? fundedBy(remaining, s2Goals) : 'Only your planned monthly contributions go to goals — none are set yet') : 'Goals get nothing extra'}</div>
+        </div>
+      </div>`}
+    </section>`;
+}
+function editPay() {
+  const p = state.settings.pay || { amount: '', freq: 'biweekly' };
+  openModal(`
+    <h2>Take-home pay</h2>
+    <p class="faint">Use what actually lands in your account after taxes, 401(k) and insurance.</p>
+    <div class="row">
+      <label class="field"><span>Net pay per paycheck</span><input class="input" name="amount" type="number" step="0.01" min="0" inputmode="decimal" value="${p.amount}" required placeholder="e.g. 2450"></label>
+      <label class="field"><span>How often</span><select class="input" name="freq">${Object.entries(PAY_FREQ).map(([k, v]) => `<option value="${k}" ${p.freq === k ? 'selected' : ''}>${v.label}</option>`).join('')}</select></label>
+    </div>
+    <div class="note" id="pay-preview"></div>
+    <div class="modal-actions">
+      ${state.settings.pay ? '<button class="btn danger" value="delete" formnovalidate>Remove</button><span class="spacer"></span>' : ''}
+      <button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="ok">Save</button>
+    </div>`,
+    form => {
+      state.settings.pay = { amount: round2(+form.amount.value), freq: form.freq.value };
+      save(); render();
+    },
+    form => {
+      const upd = () => {
+        const a = +form.amount.value || 0, n = PAY_FREQ[form.freq.value].perYear;
+        $('#pay-preview', form).innerHTML = a ? `<b class="num">${money(a * n / 12)}</b> a month · <b class="num">${money(a * n)}</b> a year${form.freq.value === 'biweekly' ? ' <span class="faint">(26 paychecks — two months a year have three)</span>' : ''}` : 'Enter an amount to see your monthly and yearly totals.';
+      };
+      form.addEventListener('input', upd); upd();
+    },
+    v => { if (v === 'delete') { state.settings.pay = null; save(); render(); } });
 }
 
 /* ---------- Goals ---------- */
@@ -941,6 +1054,13 @@ function goalCard(g) {
   if (remaining <= 0) hint = '🎉 Goal reached!';
   else if (months != null && months > 0) hint = `Put in <b class="num">${money(remaining / months, { cents: false })}</b>/month to hit it by ${parseISO(g.due).toLocaleDateString('en-US', { month: 'short', year: 'numeric' })}`;
   else if (months === 0) hint = `Due this month — <b class="num">${money(remaining, { cents: false })}</b> to go`;
+  if (remaining > 0 && g.monthly > 0) {
+    const n = Math.ceil(remaining / g.monthly);
+    const d = new Date(); d.setMonth(d.getMonth() + n);
+    const label = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    const late = g.due && d > parseISO(g.due) ;
+    hint = `<b class="num">${money(g.monthly, { cents: false })}</b>/month → done by <b>${label}</b>${late ? ` <span class="neg">· ${money(remaining / Math.max(1, months), { cents: false })}/mo needed for your date</span>` : ''}`;
+  }
   return `<section class="card goal">
     <div class="goal-top" data-act="edit-goal" data-id="${g.id}" style="cursor:pointer">
       <div class="ring"><svg viewBox="0 0 64 64"><circle cx="32" cy="32" r="${r}" fill="none" stroke="var(--surface-2)" stroke-width="7"/><circle cx="32" cy="32" r="${r}" fill="none" stroke="var(--accent)" stroke-width="7" stroke-linecap="round" stroke-dasharray="${pct * C} ${C}"/></svg><span>${Math.round(pct * 100)}%</span></div>
@@ -1150,6 +1270,7 @@ function editAccount(id) {
     form => {
       const f = Object.fromEntries(new FormData(form));
       a.nickname = f.nickname.trim() && f.nickname.trim() !== a.name ? f.nickname.trim() : '';
+      if (f.type !== a.type) a.typeLocked = true;
       a.type = f.type;
       a.hidden = !!f.hidden;
       if (balanceEditable && f.balance !== '') {
@@ -1261,7 +1382,11 @@ function editGoal(id) {
       <label class="field"><span>Target amount</span><input class="input" name="target" type="number" step="1" min="1" value="${g?.target ?? ''}" required></label>
       <label class="field"><span>Target date (optional)</span><input class="input" name="due" type="date" value="${g?.due || ''}"></label>
     </div>
-    <label class="field"><span>Already saved before tracking</span><input class="input" name="start" type="number" step="0.01" value="${g?.start ?? 0}"></label>
+    <div class="row">
+      <label class="field"><span>Monthly contribution</span><input class="input" name="monthly" type="number" step="1" min="0" value="${g?.monthly ?? ''}" placeholder="e.g. 250"></label>
+      <label class="field"><span>Already saved</span><input class="input" name="start" type="number" step="0.01" value="${g?.start ?? 0}"></label>
+    </div>
+    <p class="faint" id="goal-monthly-hint" style="margin-top:-4px">At the end of each month Tally asks whether to add your monthly contribution.</p>
     ${g && g.contributions.length ? `<div class="field"><span>Contributions</span><div class="txn-list">${[...g.contributions].reverse().map(c => `<div class="txn" style="cursor:default"><div class="txn-ico">${c.amount >= 0 ? '➕' : '➖'}</div><div><div class="txn-desc">${dayLabel(c.date)}</div>${c.note ? `<div class="txn-meta">${esc(c.note)}</div>` : ''}</div><div class="txn-amt num ${c.amount >= 0 ? 'pos' : 'neg'}">${money(c.amount, { sign: true })} <button class="link-btn" value="rm:${c.id}" formnovalidate title="Remove">✕</button></div></div>`).join('')}</div></div>` : ''}
     <div class="modal-actions">
       ${g ? '<button class="btn danger" value="delete" formnovalidate>Delete goal</button><span class="spacer"></span>' : ''}
@@ -1270,8 +1395,8 @@ function editGoal(id) {
     </div>`,
     form => {
       const f = Object.fromEntries(new FormData(form));
-      const data = { emoji: f.emoji.trim() || '🎯', name: f.name.trim(), target: +f.target, due: f.due || null, start: +f.start || 0 };
-      if (g) Object.assign(g, data); else state.goals.push({ id: uid(), contributions: [], ...data });
+      const data = { emoji: f.emoji.trim() || '🎯', name: f.name.trim(), target: +f.target, due: f.due || null, start: +f.start || 0, monthly: Math.max(0, +f.monthly || 0) };
+      if (g) Object.assign(g, data); else state.goals.push({ id: uid(), contributions: [], promptedThrough: addMonths(monthKey(new Date()), -1), ...data });
       save(); render();
     }, null,
     v => {
@@ -1314,6 +1439,69 @@ function contribute(id) {
   }
 }
 
+/* ---------- End-of-month goal check-in ---------- */
+function lastDayOfMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(); }
+// Months that have ended (or end today) and haven't been asked about yet.
+function dueCheckin() {
+  const now = new Date(), cur = monthKey(now);
+  const latest = now.getDate() === lastDayOfMonth(now) ? cur : addMonths(cur, -1);
+  let month = null; const goals = [];
+  for (const g of state.goals) {
+    if (!(g.monthly > 0)) continue;
+    if (!g.promptedThrough) { g.promptedThrough = addMonths(cur, -1); continue; }
+    if (g.promptedThrough >= latest) continue;
+    const next = addMonths(g.promptedThrough, 1);
+    if (!month || next < month) month = next;
+  }
+  if (!month) return null;
+  for (const g of state.goals) if (g.monthly > 0 && g.promptedThrough && addMonths(g.promptedThrough, 1) === month) goals.push(g);
+  return { month, goals };
+}
+function maybeCheckin() {
+  if (!state || state.demo || $('#modal').open) return;
+  const due = dueCheckin();
+  save();
+  if (!due) return;
+  const { month, goals } = due;
+  const lastDate = `${month}-${pad(lastDayOfMonth(parseISO(month + '-01')))}`;
+  const name = parseISO(month + '-01').toLocaleDateString('en-US', { month: 'long' });
+  openModal(`
+    <h2>${name} goal check-in</h2>
+    <p class="faint">${name} ${month < monthKey(new Date()) ? 'has ended' : 'ends today'}. Do you want to put this month’s contributions into your goals?</p>
+    ${goals.map(g => {
+      const left = Math.max(0, g.target - goalSaved(g));
+      return `<div class="checkin-row">
+        <label class="check" style="margin:0"><input type="checkbox" name="on-${g.id}" ${left > 0 ? 'checked' : ''}> <span>${esc(g.emoji)} <b>${esc(g.name)}</b><br><span class="faint">${left > 0 ? money(left, { cents: false }) + ' to go' : 'already reached'}</span></span></label>
+        <input class="input num" name="amt-${g.id}" type="number" step="0.01" min="0" value="${Math.min(g.monthly, left || g.monthly)}">
+      </div>`;
+    }).join('')}
+    <div class="modal-actions">
+      <button class="btn" value="skip" formnovalidate>Skip ${name}</button><span class="spacer"></span>
+      <button class="btn" value="cancel" formnovalidate>Ask me later</button>
+      <button class="btn primary" value="ok">Add contributions</button>
+    </div>`,
+    form => {
+      let total = 0;
+      for (const g of goals) {
+        const amt = round2(+form[`amt-${g.id}`].value || 0);
+        if (form[`on-${g.id}`].checked && amt > 0) {
+          g.contributions.push({ id: uid(), date: lastDate, amount: amt, note: `${name} monthly contribution` });
+          total += amt;
+        }
+        g.promptedThrough = month;
+      }
+      save(); render();
+      toast(total ? `Added ${money(total)} to your goals` : 'Nothing added');
+      setTimeout(maybeCheckin, 400);
+    }, null,
+    v => {
+      if (v === 'skip') {
+        for (const g of goals) g.promptedThrough = month;
+        save(); render(); setTimeout(maybeCheckin, 400);
+      }
+    });
+}
+
 /* =========================================================================
    Events
    ========================================================================= */
@@ -1338,6 +1526,9 @@ document.addEventListener('click', async e => {
     case 'close-settings': ui.settingsOpen = false; render(); break;
     case 'goto': ui.tab = el.dataset.tab; render(); window.scrollTo(0, 0); break;
     case 'sync': syncNow(); break;
+    case 'toggle-retire':
+      state.settings.includeRetirement = !state.settings.includeRetirement; save(); render();
+      toast(state.settings.includeRetirement ? 'Retirement included in net worth' : 'Retirement left out of net worth'); break;
     case 'sf-connect': {
       const token = $('#sf-token').value.trim();
       if (!token) return toast('Paste your setup token first');
@@ -1376,6 +1567,7 @@ document.addEventListener('click', async e => {
     case 'add-category': addCategory(); break;
     case 'show-uncat': ui.tab = 'transactions'; ui.txnFilter = 'uncategorized'; render(); window.scrollTo(0, 0); break;
     case 'add-goal': editGoal(null); break;
+    case 'edit-pay': editPay(); break;
     case 'edit-goal': editGoal(id); break;
     case 'contribute': contribute(id); break;
     case 'export': exportBackup(); break;
@@ -1446,7 +1638,8 @@ function toast(msg) {
 if (state) { takeSnapshot(); save(); }
 render();
 maybeAutoSync();
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state) { maybeAutoSync(); render(); } });
+setTimeout(maybeCheckin, 600);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state) { maybeAutoSync(); render(); maybeCheckin(); } });
 setInterval(() => state && maybeAutoSync(), 5 * 60000);
 window.addEventListener('online', () => state && maybeAutoSync());
 
