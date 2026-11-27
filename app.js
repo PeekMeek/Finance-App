@@ -8,7 +8,7 @@
    Constants
    ========================================================================= */
 const STORE_KEY = 'tally.v1';
-const APP_VERSION = '1.6.0';
+const APP_VERSION = '1.8.0';
 
 const ACCOUNT_TYPES = {
   checking:   { label: 'Checking',    group: 'cash',   asset: true },
@@ -29,31 +29,33 @@ const GROUPS = {
 // Account types whose transactions count toward the budget.
 const SPENDING_TYPES = new Set(['checking', 'savings', 'credit']);
 
+// Matches the user's Copilot setup. `group` is the parent category ('' = stands alone).
 const DEFAULT_CATEGORIES = [
-  { id: 'mortgage',      name: 'Mortgage',          emoji: '🏠', group: 'Fixed',     budget: 1850 },
-  { id: 'utilities',     name: 'Utilities',         emoji: '💡', group: 'Fixed',     budget: 260 },
-  { id: 'phone',         name: 'Phone & internet',  emoji: '📶', group: 'Fixed',     budget: 140 },
-  { id: 'insurance',     name: 'Insurance',         emoji: '🛡️', group: 'Fixed',     budget: 180 },
-  { id: 'groceries',     name: 'Groceries',         emoji: '🛒', group: 'Everyday',  budget: 650 },
-  { id: 'eating-out',    name: 'Eating out',        emoji: '🍽️', group: 'Everyday',  budget: 300 },
-  { id: 'gas',           name: 'Gas & auto',        emoji: '⛽', group: 'Everyday',  budget: 200 },
-  { id: 'household',     name: 'Household',         emoji: '🧺', group: 'Everyday',  budget: 120 },
-  { id: 'shopping',      name: 'Shopping',          emoji: '🛍️', group: 'Lifestyle', budget: 200 },
-  { id: 'subscriptions', name: 'Subscriptions',     emoji: '🔁', group: 'Lifestyle', budget: 60 },
-  { id: 'entertainment', name: 'Entertainment',     emoji: '🎟️', group: 'Lifestyle', budget: 100 },
-  { id: 'health',        name: 'Health',            emoji: '💊', group: 'Lifestyle', budget: 80 },
-  { id: 'travel',        name: 'Travel',            emoji: '✈️', group: 'Lifestyle', budget: 150 },
-  { id: 'gifts',         name: 'Gifts & giving',    emoji: '🎁', group: 'Lifestyle', budget: 50 },
-  { id: 'misc',          name: 'Everything else',   emoji: '📦', group: 'Other',     budget: 100 },
-  { id: 'work',          name: 'Work expenses',     emoji: '💼', group: 'Excluded',  budget: 0, excluded: true },
+  { id: 'misc',           name: 'Other',             emoji: '🙋', group: '',                budget: 50 },
+  { id: 'household',      name: 'Home',              emoji: '🏡', group: 'Household',       budget: 100 },
+  { id: 'utilities',      name: 'Utilities',         emoji: '🔌', group: 'Household',       budget: 300 },
+  { id: 'mortgage',       name: 'Mortgage',          emoji: '🔑', group: 'Household',       budget: 2350 },
+  { id: 'groceries',      name: 'Groceries',         emoji: '🥑', group: 'Food & Drink',    budget: 600 },
+  { id: 'eating-out',     name: 'Restaurants',       emoji: '🍔', group: 'Food & Drink',    budget: 100 },
+  { id: 'shopping',       name: 'Shops',             emoji: '🛍️', group: 'Shopping',        budget: 200 },
+  { id: 'subscriptions',  name: 'Subscriptions',     emoji: '💳', group: '',                budget: 50 },
+  { id: 'pets',           name: 'Pets',              emoji: '🐶', group: '',                budget: 150 },
+  { id: 'gas',            name: 'Car',               emoji: '🚗', group: 'Car & Transport', budget: 150 },
+  { id: 'transportation', name: 'Transportation',    emoji: '🚌', group: 'Car & Transport', budget: 0 },
+  { id: 'health',         name: 'Healthcare',        emoji: '💊', group: '',                budget: 30 },
+  { id: 'travel',         name: 'Travel & Vacation', emoji: '🏖️', group: '',                budget: 100 },
+  { id: 'work',           name: 'Work Expenses',     emoji: '💼', group: 'Excluded',        budget: 0, excluded: true },
+  { id: 'eop',            name: 'EOP',               emoji: '💸', group: 'Excluded',        budget: 0, excluded: true },
 ];
+// Old Tally categories → where they live in the Copilot layout.
+const CATEGORY_MOVES = { phone: 'utilities', insurance: 'gas', entertainment: 'misc', gifts: 'misc' };
+function parentNames() { return [...new Set(state.categories.filter(c => !c.excluded && c.group).map(c => c.group))]; }
 // Not budgeted: money in, money moved between your own accounts, and not-yet-sorted.
 const SYSTEM_CATEGORIES = [
   { id: 'income',        name: 'Income',            emoji: '💰', system: true },
   { id: 'transfer',      name: 'Transfer / card payment', emoji: '🔄', system: true },
   { id: 'uncategorized', name: 'Uncategorized',     emoji: '❔', system: true },
 ];
-const GROUP_ORDER = ['Fixed', 'Everyday', 'Lifestyle', 'Other'];
 
 // First match wins. Your own "remember this merchant" choices always override these.
 const KEYWORD_RULES = [
@@ -62,19 +64,21 @@ const KEYWORD_RULES = [
   [/payroll|direct dep|salary|paycheck|dir dep|irs treas|tax ref|interest paid|dividend/i, 'income'],
   [/mortgage|mtg|loan servic|mr\.? ?cooper|rocket mort|home loan|escrow/i, 'mortgage'],
   [/\bdte\b|consumers energy|electric|water|sewer|gas co|semco|utility|trash|waste mgmt/i, 'utilities'],
-  [/comcast|xfinity|verizon|t-?mobile|at&t|spectrum|wow!|internet|wireless/i, 'phone'],
-  [/insurance|geico|progressive|state farm|allstate|auto-owners|usaa ins|frankenmuth/i, 'insurance'],
+  [/comcast|xfinity|verizon|t-?mobile|at&t|spectrum|wow!|internet|wireless/i, 'utilities'],
+  [/insurance|geico|progressive|state farm|allstate|auto-owners|usaa ins|frankenmuth/i, 'gas'],
+  [/chewy|petco|petsmart|pet supplies|veterinar|\bvet\b|banfield|rover\.com|barkbox/i, 'pets'],
+  [/uber trip|uber \*trip|lyft|parking|park mobile|parkmobile|toll|e-?zpass|transit|metro|bus pass/i, 'transportation'],
   [/kroger|meijer|aldi|whole foods|trader joe|costco whse|costco wholesale|sam'?s club|walmart grocery|safeway|publix|wegmans|heb|grocery|market|spartan|busch'?s|fresh thyme|instacart/i, 'groceries'],
   [/restaurant|mcdonald|starbucks|chipotle|doordash|uber ?eats|grubhub|pizza|cafe|coffee|taco|panera|chick-?fil|wendy|burger|subway|tim hortons|culver|grill|kitchen|bar &|diner|sushi|bistro|tst\*|sq \*.*(cafe|coffee)/i, 'eating-out'],
   [/shell|bp#|\bbp\b|speedway|exxon|mobil|marathon|sunoco|costco gas|citgo|circle k|chevron|valero|gas station|fuel|jiffy|autozone|oil change|car wash|tire/i, 'gas'],
   [/netflix|spotify|hulu|disney|apple\.com\/bill|youtube|prime video|amazon prime|max\.com|hbo|paramount|peacock|icloud|patreon|subscription|adobe|microsoft 365|chatgpt|claude\.ai|anthropic/i, 'subscriptions'],
   [/pharmacy|cvs|walgreens|rite aid|doctor|dental|dentist|clinic|hospital|medical|optical|vision|urgent care|labcorp|quest diag/i, 'health'],
-  [/airline|delta air|united air|southwest|american air|airbnb|hotel|marriott|hilton|hyatt|expedia|booking\.com|uber trip|lyft|amtrak/i, 'travel'],
-  [/movie|cinema|amc |regal|theater|theatre|ticketmaster|stubhub|steam|playstation|xbox|nintendo|bowling|museum|concert/i, 'entertainment'],
+  [/airline|delta air|united air|southwest|american air|airbnb|hotel|marriott|hilton|hyatt|expedia|booking\.com|amtrak/i, 'travel'],
+  [/movie|cinema|amc |regal|theater|theatre|ticketmaster|stubhub|steam|playstation|xbox|nintendo|bowling|museum|concert/i, 'misc'],
   [/home depot|lowe'?s|menards|ace hardware|ikea|bed bath|target|walmart|dollar|cleaning/i, 'household'],
   [/amazon|amzn|etsy|ebay|best buy|apple store|apple\.com(?!\/bill)|nike|old navy|gap|kohl|macy|tj ?maxx|marshalls|rei |clothing/i, 'shopping'],
   [/salon|barber|haircut|spa|nail|gym|fitness|planet fitness/i, 'misc'],
-  [/donation|church|charity|gofundme|giving|gift/i, 'gifts'],
+  [/donation|church|charity|gofundme|giving|gift/i, 'misc'],
 ];
 
 /* =========================================================================
@@ -99,6 +103,7 @@ function freshState() {
     version: 1,
     demo: false,
     reviewMigrated: true,
+    categoriesV2: true,
     recurringIgnored: {},
     accounts: [],
     transactions: [],
@@ -134,12 +139,31 @@ function loadState() {
       for (const t of st.transactions) if (t.reviewed == null) t.reviewed = t.date < cutoff;
       st.reviewMigrated = true;
     }
-    if (!st.categories.some(c => c.id === 'work')) st.categories.push({ id: 'work', name: 'Work expenses', emoji: '💼', group: 'Excluded', budget: 0, excluded: true });
+    if (!st.categoriesV2) migrateToCopilotCategories(st);
     return st;
   } catch (e) {
     console.error('Could not load saved data', e);
     return null;
   }
+}
+// One-time switch to the Copilot category layout and budgets. Keeps every transaction, moving
+// old categories to their closest Copilot match and merging any custom ones with the same name.
+function migrateToCopilotCategories(st) {
+  const fresh = DEFAULT_CATEGORIES.map(c => ({ ...c }));
+  const remap = { ...CATEGORY_MOVES };
+  for (const c of st.categories) {
+    if (fresh.some(f => f.id === c.id) || remap[c.id]) continue;
+    const same = fresh.find(f => f.name.toLowerCase() === c.name.toLowerCase());
+    if (same) remap[c.id] = same.id;
+    else fresh.push({ ...c, group: c.excluded ? 'Excluded' : '' }); // your own categories stay, standing alone
+  }
+  for (const t of st.transactions) if (remap[t.category]) t.category = remap[t.category];
+  for (const k in st.rules) if (remap[st.rules[k]]) st.rules[k] = remap[st.rules[k]];
+  for (const m in st.budgetOverrides) for (const id in st.budgetOverrides[m]) if (remap[id] || !fresh.some(f => f.id === id)) delete st.budgetOverrides[m][id];
+  const w = st.settings?.widget;
+  if (w?.selected) w.selected = [...new Set(w.selected.map(id => remap[id] || id))].filter(id => fresh.some(f => f.id === id));
+  st.categories = fresh;
+  st.categoriesV2 = true;
 }
 function save() {
   try { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
@@ -574,6 +598,7 @@ function openCSVImport(file) {
     const rows = parseCSV(reader.result);
     if (rows.length < 2) return toast('That file has no rows');
     const headers = rows[0];
+    if (isCopilotCSV(headers)) { openCopilotImport(file); return; }
     const body = rows.slice(1);
     const isApple = headers.some(h => /clearing date/i.test(h)) && headers.some(h => /amount \(usd\)/i.test(h));
     const isAmex = !isApple && headers.some(h => /^date$/i.test(h.trim())) && headers.some(h => /^description$/i.test(h.trim())) && headers.some(h => /card member/i.test(h));
@@ -661,6 +686,217 @@ function openCSVImport(file) {
       });
   };
   reader.readAsText(file);
+}
+
+/* =========================================================================
+   Copilot import & comparison
+   ========================================================================= */
+// Copilot's export columns: date, name, amount, status, category, parent category, excluded, type, account, account mask, note, recurring
+function copilotCols(headers) {
+  const h = headers.map(x => x.toLowerCase().trim());
+  const f = (...names) => {
+    for (const n of names) { const i = h.indexOf(n); if (i >= 0) return i; }
+    for (const n of names) { const i = h.findIndex(x => x.includes(n)); if (i >= 0) return i; }
+    return -1;
+  };
+  return {
+    date: f('date'), name: f('name', 'merchant', 'description'), amount: f('amount'), status: f('status'),
+    category: f('category'), parent: f('parent category', 'parent'), excluded: f('excluded'), type: f('type'),
+    account: f('account'), mask: f('account mask', 'mask'), note: f('note', 'notes'),
+  };
+}
+function isCopilotCSV(headers) {
+  const h = headers.map(x => x.toLowerCase().trim());
+  return h.includes('category') && h.includes('account') && (h.includes('parent category') || h.includes('excluded'));
+}
+const normName = s => String(s || '').toLowerCase().replace(/\(.*?\)|[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+function guessTallyAccount(name, mask) {
+  const pool = state.accounts;
+  if (mask) {
+    const m = pool.find(a => new RegExp(`\\b${mask}\\b`).test(`${a.name} ${a.nickname || ''}`));
+    if (m) return m.id;
+  }
+  const n = normName(name);
+  const exact = pool.find(a => normName(a.name) === n || normName(a.nickname) === n);
+  if (exact) return exact.id;
+  const loose = pool.find(a => n && (normName(a.name).includes(n) || n.includes(normName(a.name))) && normName(a.name).length > 3);
+  return loose ? loose.id : 'new';
+}
+function copilotCategoryId(row, created) {
+  const type = (row.type || '').toLowerCase(), name = (row.category || '').trim();
+  if (/transfer/.test(type) || /^(transfer|internal transfer|credit card payment)s?$/i.test(name)) return 'transfer';
+  if (/income/.test(type) || /^(income|paychecks?)$/i.test(name) || /^income$/i.test(row.parent || '')) return 'income';
+  let id = 'uncategorized';
+  if (name) {
+    let c = state.categories.find(x => x.name.toLowerCase() === name.toLowerCase());
+    if (!c) {
+      const parent = (row.parent || '').trim();
+      c = { id: 'c-' + uid(), name, emoji: '🏷️', group: row.excluded ? 'Excluded' : (parent && parent.toLowerCase() !== name.toLowerCase() ? parent : ''), budget: 0, excluded: !!row.excluded };
+      state.categories.push(c); created.push(c.name);
+    }
+    id = c.id;
+  }
+  // Excluded in Copilot but sitting in a normal category → keep it out of the budget here too.
+  if (row.excluded && !isExcluded(id)) {
+    let ex = state.categories.find(x => x.excluded && x.name === 'Excluded');
+    if (!ex) { ex = { id: 'c-' + uid(), name: 'Excluded', emoji: '🚫', group: 'Excluded', budget: 0, excluded: true }; state.categories.push(ex); created.push('Excluded'); }
+    id = ex.id;
+  }
+  return id;
+}
+
+function openCopilotImport(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const rows = parseCSV(reader.result);
+    if (rows.length < 2) return toast('That file has no rows');
+    const col = copilotCols(rows[0]);
+    if (col.date < 0 || col.amount < 0) return toast('This doesn’t look like a Copilot export (no date/amount columns)');
+    const get = (r, k) => (col[k] >= 0 ? (r[col[k]] || '').trim() : '');
+    const recs = rows.slice(1).map(r => ({
+      date: parseAnyDate(get(r, 'date')), name: get(r, 'name') || 'Transaction', raw: parseAmount(get(r, 'amount')),
+      pending: /pending/i.test(get(r, 'status')), category: get(r, 'category'), parent: get(r, 'parent'),
+      excluded: /^(true|yes|1)$/i.test(get(r, 'excluded')), type: get(r, 'type'), account: get(r, 'account') || 'Copilot account',
+      mask: get(r, 'mask').replace(/\D/g, ''), note: get(r, 'note'),
+    })).filter(r => r.date && !isNaN(r.raw));
+    if (!recs.length) return toast('No readable transactions in that file');
+
+    // Copilot may write expenses as positive numbers — pick whichever sign matches Tally's transactions better.
+    const score = sign => recs.slice(0, 400).reduce((n, r) => n + (state.transactions.some(t => Math.abs(t.amount - sign * r.raw) < 0.005 && Math.abs(daysBetween(t.date, r.date)) <= 4) ? 1 : 0), 0);
+    let sign = -1;
+    const sPos = score(1), sNeg = score(-1);
+    if (sPos > sNeg) sign = 1;
+    else if (sPos === sNeg) {
+      const inc = recs.filter(r => /income/i.test(r.type) || /^income$/i.test(r.category));
+      if (inc.length && inc.filter(r => r.raw > 0).length > inc.length / 2) sign = 1;
+    }
+
+    const accts = {};
+    for (const r of recs) { const k = `${r.account}|${r.mask}`; (accts[k] ||= { name: r.account, mask: r.mask, n: 0 }).n++; }
+    const accList = Object.entries(accts).sort((a, b) => b[1].n - a[1].n);
+    const minD = recs.reduce((m, r) => r.date < m ? r.date : m, recs[0].date), maxD = recs.reduce((m, r) => r.date > m ? r.date : m, recs[0].date);
+    const opts = state.accounts.map(a => `<option value="${a.id}">${esc(acctName(a))}</option>`).join('');
+
+    openModal(`
+      <h2>Import from Copilot</h2>
+      <p class="faint">${recs.length.toLocaleString()} transactions · ${dayLabel(minD)} – ${dayLabel(maxD)} · spending is written as ${sign === -1 ? 'positive' : 'negative'} numbers in this file</p>
+      <div class="field"><span>Match Copilot accounts to Tally</span>
+        <div class="cp-accts">${accList.map(([k, a], i) => {
+          const guess = guessTallyAccount(a.name, a.mask);
+          return `<div class="cp-acct"><div><b>${esc(a.name)}</b>${a.mask ? ` <span class="faint">••${esc(a.mask)}</span>` : ''}<div class="faint">${a.n} transactions</div></div>
+            <select class="input" name="acct-${i}" data-key="${esc(k)}">${opts.replace(`value="${guess}"`, `value="${guess}" selected`)}<option value="new" ${guess === 'new' ? 'selected' : ''}>＋ New account</option><option value="skip">Skip</option></select></div>`;
+        }).join('')}</div>
+      </div>
+      <label class="check"><input type="checkbox" name="useCats" checked> Use Copilot’s categories on matching transactions</label>
+      <label class="check"><input type="checkbox" name="addMissing" checked> Add transactions Tally doesn’t have (e.g. history older than 60 days)</label>
+      <label class="check"><input type="checkbox" name="markReviewed" checked> Mark matched transactions as reviewed</label>
+      <div class="modal-actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="ok">Import & compare</button></div>`,
+      form => {
+        const map = {};
+        $$('select[data-key]', form).forEach(s => map[s.dataset.key] = s.value);
+        const f = Object.fromEntries(new FormData(form));
+        if (state.demo) { toast('Load your real accounts before importing from Copilot'); return; }
+        const report = runCopilotImport(recs, sign, map, { useCats: !!f.useCats, addMissing: !!f.addMissing, markReviewed: !!f.markReviewed });
+        sortTxns(); takeSnapshot(); save(); render();
+        setTimeout(() => showCopilotReport(report), 50);
+      });
+  };
+  reader.readAsText(file);
+}
+
+function runCopilotImport(recs, sign, map, opt) {
+  const created = [], newAccts = {};
+  const res = { matched: 0, recategorized: 0, added: 0, skipped: 0, created, rows: [], accountIds: new Set() };
+  const used = new Set();
+  const byAcct = {};
+  for (const t of state.transactions) (byAcct[t.accountId] ||= []).push(t);
+  for (const r of [...recs].sort((a, b) => a.date.localeCompare(b.date))) {
+    const key = `${r.account}|${r.mask}`;
+    let target = map[key];
+    if (!target || target === 'skip') { res.skipped++; continue; }
+    if (target === 'new') {
+      if (!newAccts[key]) {
+        const a = { id: uid(), source: 'csv', name: r.mask ? `${r.account} (${r.mask})` : r.account, org: '', type: guessType(r.account, '', 0), balance: 0, hidden: false, balanceDate: Date.now() };
+        state.accounts.push(a); newAccts[key] = a.id;
+      }
+      target = newAccts[key]; map[key] = target;
+    }
+    res.accountIds.add(target);
+    const amount = round2(sign * r.raw);
+    const catId = copilotCategoryId(r, created);
+    res.rows.push({ accountId: target, date: r.date, amount, category: catId });
+    const pool = (byAcct[target] ||= []);
+    let best = null, bestD = 99;
+    for (const t of pool) {
+      if (used.has(t.id) || Math.abs(t.amount - amount) >= 0.005) continue;
+      const d = Math.abs(daysBetween(t.date, r.date));
+      if (d <= 4 && d < bestD) { best = t; bestD = d; }
+    }
+    if (best) {
+      used.add(best.id); res.matched++;
+      if (opt.useCats && best.category !== catId) { best.category = catId; res.recategorized++; }
+      if (opt.markReviewed) best.reviewed = true;
+      if (r.note && !best.note) best.note = r.note;
+    } else if (opt.addMissing) {
+      const t = { id: 'cp:' + uid(), accountId: target, source: 'copilot', date: r.date, amount, desc: r.name, pending: r.pending, note: r.note, category: catId, reviewed: true };
+      state.transactions.push(t); pool.push(t); used.add(t.id); res.added++;
+    }
+  }
+  // Tally transactions in the same accounts and dates that Copilot doesn't have.
+  const dates = res.rows.map(x => x.date).sort();
+  res.from = dates[0]; res.to = dates[dates.length - 1];
+  res.tallyOnly = state.transactions.filter(t => res.accountIds.has(t.accountId) && !used.has(t.id) && !t.pending && t.date >= res.from && t.date <= res.to);
+  return res;
+}
+
+function showCopilotReport(res) {
+  // Compare budget spending month by month, using Copilot's rows (as mapped) vs Tally's own totals.
+  const isSpend = (accountId, category) => { const a = acct(accountId); return a && !a.hidden && SPENDING_TYPES.has(a.type) && !['income', 'transfer'].includes(category) && !isExcluded(category); };
+  const months = [...new Set(res.rows.map(r => r.date.slice(0, 7)))].sort().reverse().slice(0, 6);
+  const cp = {}, cpCat = {};
+  for (const r of res.rows) {
+    if (!isSpend(r.accountId, r.category)) continue;
+    const m = r.date.slice(0, 7);
+    cp[m] = (cp[m] || 0) - r.amount;
+    ((cpCat[m] ||= {})[r.category] = (cpCat[m][r.category] || 0) - r.amount);
+  }
+  const tallyMonth = m => {
+    const byCat = {};
+    for (const t of state.transactions) {
+      if (!t.date.startsWith(m) || !res.accountIds.has(t.accountId) || !isSpend(t.accountId, t.category)) continue;
+      byCat[t.category] = (byCat[t.category] || 0) - t.amount;
+    }
+    return byCat;
+  };
+  const sum = o => Object.values(o).reduce((a, b) => a + b, 0);
+  const latest = months[0];
+  const tLatest = latest ? tallyMonth(latest) : {};
+  const catDiffs = latest ? [...new Set([...Object.keys(cpCat[latest] || {}), ...Object.keys(tLatest)])]
+    .map(id => ({ id, c: (cpCat[latest] || {})[id] || 0, t: tLatest[id] || 0 })).filter(x => Math.abs(x.c - x.t) >= 1).sort((a, b) => Math.abs(b.c - b.t) - Math.abs(a.c - a.t)) : [];
+  const diffCell = d => Math.abs(d) < 1 ? '<span class="pos">✓</span>' : `<span class="${d > 0 ? 'neg' : 'pos'}">${d > 0 ? '+' : '−'}${money(Math.abs(d), { cents: false }).replace('−', '')}</span>`;
+  openModal(`
+    <h2>Copilot vs Tally</h2>
+    <div class="budget-summary" style="margin-bottom:14px">
+      <div><div class="k">Matched</div><div class="v num">${res.matched.toLocaleString()}</div></div>
+      <div><div class="k">Added to Tally</div><div class="v num">${res.added.toLocaleString()}</div></div>
+      <div><div class="k">Recategorized</div><div class="v num">${res.recategorized.toLocaleString()}</div></div>
+    </div>
+    ${res.created.length ? `<p class="faint">New categories from Copilot: ${res.created.map(esc).join(', ')} — set their budgets on the Budget page.</p>` : ''}
+    ${res.skipped ? `<p class="faint">${res.skipped} transactions skipped (accounts you chose to skip).</p>` : ''}
+    <div class="field"><span>Budget spending by month</span>
+      <table class="cmp"><thead><tr><th>Month</th><th>Copilot</th><th>Tally</th><th>Diff</th></tr></thead><tbody>
+      ${months.map(m => { const c = cp[m] || 0, t = sum(tallyMonth(m)); return `<tr><td>${monthLabel(m)}</td><td class="num">${money(c, { cents: false })}</td><td class="num">${money(t, { cents: false })}</td><td class="num">${diffCell(t - c)}</td></tr>`; }).join('')}
+      </tbody></table>
+    </div>
+    ${latest ? `<div class="field"><span>${monthLabel(latest)} by category ${catDiffs.length ? '' : '— everything lines up ✓'}</span>
+      ${catDiffs.length ? `<table class="cmp"><thead><tr><th>Category</th><th>Copilot</th><th>Tally</th><th>Diff</th></tr></thead><tbody>
+        ${catDiffs.slice(0, 12).map(x => `<tr><td>${cat(x.id).emoji} ${esc(cat(x.id).name)}</td><td class="num">${money(x.c, { cents: false })}</td><td class="num">${money(x.t, { cents: false })}</td><td class="num">${diffCell(x.t - x.c)}</td></tr>`).join('')}
+      </tbody></table>` : ''}</div>` : ''}
+    ${res.tallyOnly.length ? `<div class="field"><span>In Tally but not in Copilot (${res.tallyOnly.length}) — usually duplicates or charges Copilot hid</span>
+      <div class="txn-list">${res.tallyOnly.slice(0, 15).map(txnRow).join('')}</div></div>` : '<p class="faint">Every Tally transaction in that period was found in Copilot.</p>'}
+    <div class="modal-actions"><button class="btn primary" value="cancel">Done</button></div>`,
+    null,
+    form => form.addEventListener('click', e => { const r = e.target.closest('.txn'); if (r) { e.preventDefault(); $('#modal').close(); editTxn(r.dataset.id); } }));
 }
 
 /* =========================================================================
@@ -801,7 +1037,8 @@ function daysBetween(a, b) { return Math.round((parseISO(b) - parseISO(a)) / 864
 function median(arr) { const s = [...arr].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }
 function catHue(id) {
   const fixed = { mortgage: 28, utilities: 45, phone: 190, insurance: 210, groceries: 95, 'eating-out': 18, gas: 0, household: 160,
-    shopping: 330, subscriptions: 285, entertainment: 260, health: 140, travel: 200, gifts: 350, misc: 220, income: 140, transfer: 215, uncategorized: 220 };
+    shopping: 330, subscriptions: 285, entertainment: 260, health: 350, travel: 200, gifts: 350, misc: 220, income: 140, transfer: 215, uncategorized: 220,
+    pets: 30, transportation: 190, work: 25, eop: 150 };
   if (fixed[id] != null) return fixed[id];
   let h = 0; for (const ch of String(id)) h = (h * 37 + ch.charCodeAt(0)) % 360; return h;
 }
@@ -943,20 +1180,20 @@ function reviewCard() {
 function topCategoriesCard() {
   const month = monthKey(new Date());
   const { byCat } = monthSpending(month);
-  const rows = budgetCategories().map(c => ({ c, s: byCat[c.id] || 0, b: budgetFor(c.id, month) }))
-    .concat(byCat.uncategorized > 0 ? [{ c: cat('uncategorized'), s: byCat.uncategorized, b: 0 }] : [])
-    .filter(r => r.s > 0).sort((a, b) => b.s - a.s).slice(0, 7);
+  const nodes = categoryTree(byCat, month).filter(n => n.s > 0).slice(0, 7);
+  if (byCat.uncategorized > 0) nodes.push({ type: 'single', c: cat('uncategorized'), s: byCat.uncategorized, b: 0 });
   const pace = new Date().getDate() / daysInMonth();
   return `<section class="card ov-card" style="order:4">
     <div class="ov-head"><h2>Top categories</h2><button class="card-link" data-act="goto" data-tab="budget">View all ›</button></div>
-    ${rows.length ? rows.map(({ c, s, b }) => {
-      const r = b ? s / b : 1.5;
+    ${nodes.length ? nodes.map(n => {
+      const label = n.type === 'parent' ? `<span class="tr-count">${n.kids.length}</span> ${esc(n.name)}` : `${n.c.emoji} ${esc(n.c.name)}`;
+      const r = n.b ? n.s / n.b : 1.5;
       const col = r > 1 ? 'var(--bad)' : r > pace + .15 ? 'var(--warn)' : 'var(--good)';
-      return `<div class="tc-row" data-act="edit-budget" data-id="${c.id}">
-        <span class="tc-name">${c.emoji} ${esc(c.name)}</span>
-        <span class="num tc-spent">${money(s, { cents: false })}</span>
+      return `<div class="tc-row" data-act="goto" data-tab="budget">
+        <span class="tc-name">${label}</span>
+        <span class="num tc-spent">${money(n.s, { cents: false })}</span>
         <span class="tc-bar"><i style="width:${Math.min(100, r * 100)}%;background:${col}"></i></span>
-        <span class="num tc-budget">${b ? money(b, { cents: false }) : '—'}</span>
+        <span class="num tc-budget">${n.b ? money(n.b, { cents: false }) : '—'}</span>
       </div>`;
     }).join('') : '<div class="empty" style="padding:20px 0">No spending yet this month.</div>'}
   </section>`;
@@ -1160,23 +1397,9 @@ function renderBudget() {
   const budgeted = state.categories.reduce((s, c) => s + budgetFor(c.id, m), 0);
   const spent = Object.values(byCat).reduce((s, v) => s + v, 0);
   const left = budgeted - spent;
-  const groups = [...new Set([...GROUP_ORDER, ...budgetCategories().map(c => c.group)])];
   const excludedCats = state.categories.filter(c => c.excluded);
   const { excluded: exSpent } = monthSpending(m);
 
-  const catRow = c => {
-    const b = budgetFor(c.id, m), s = byCat[c.id] || 0;
-    const ratio = b ? s / b : (s > 0 ? 2 : 0);
-    const cls = ratio > 1 ? 'over' : (ratio > monthPct + .1 && ratio > .5) ? 'near' : '';
-    return `<div class="bcat" data-act="edit-budget" data-id="${c.id}">
-      <div class="bcat-top">
-        <div class="bcat-name"><span>${c.emoji}</span>${esc(c.name)}</div>
-        <div class="bcat-nums num"><b>${money(s, { cents: false })}</b> / ${money(b, { cents: false })}</div>
-      </div>
-      <div class="bar ${cls}"><i style="width:${Math.min(100, ratio * 100)}%"></i>${isCurrent ? `<span class="tick" style="left:${monthPct * 100}%"></span>` : ''}</div>
-      <div class="faint num" style="margin-top:4px">${b - s >= 0 ? money(b - s, { cents: false }) + ' left' : `<span class="neg">${money(s - b, { cents: false })} over</span>`}</div>
-    </div>`;
-  };
   const unc = byCat.uncategorized || 0;
   return `
     <div class="month-nav">
@@ -1195,12 +1418,7 @@ function renderBudget() {
     </section>
     ${renderPayCard(budgeted)}
     ${unc > 0 ? `<div class="note warn">${money(unc, { cents: false })} of spending isn’t categorized yet. <button class="link-btn" data-act="show-uncat">Sort it</button></div>` : ''}
-    ${groups.map(g => {
-      const cats = budgetCategories().filter(c => c.group === g);
-      if (!cats.length) return '';
-      const gb = cats.reduce((s, c) => s + budgetFor(c.id, m), 0), gs = cats.reduce((s, c) => s + (byCat[c.id] || 0), 0);
-      return `<section class="card"><div class="card-head"><div class="bgroup-title">${esc(g)}</div><span class="faint num">${money(gs, { cents: false })} / ${money(gb, { cents: false })}</span></div>${cats.map(catRow).join('')}</section>`;
-    }).join('')}
+    ${categoryTreeCard(m, byCat, monthPct, isCurrent)}
     <section class="card">
       <div class="card-head"><div class="bgroup-title">Excluded categories</div><span class="faint num">${money(Object.values(exSpent).reduce((a, b) => a + b, 0), { cents: false })}</span></div>
       <p class="faint" style="margin:0 0 6px">Tracked, but not counted toward your budget or monthly spending.</p>
@@ -1317,6 +1535,49 @@ function editPay() {
     v => { if (v === 'delete') { state.settings.pay = null; save(); render(); } });
 }
 
+/* ---------- Category tree (Copilot-style) ---------- */
+function categoryTree(byCat, month) {
+  const nodes = [], seen = {};
+  for (const c of budgetCategories()) {
+    const s = byCat[c.id] || 0, b = budgetFor(c.id, month);
+    if (c.group) {
+      let n = seen[c.group];
+      if (!n) { n = seen[c.group] = { type: 'parent', name: c.group, kids: [], s: 0, b: 0 }; nodes.push(n); }
+      n.kids.push({ c, s, b }); n.s += s; n.b += b;
+    } else nodes.push({ type: 'single', c, s, b });
+  }
+  nodes.sort((x, y) => y.s - x.s || y.b - x.b);
+  for (const n of nodes) if (n.kids) n.kids.sort((x, y) => y.s - x.s || y.b - x.b);
+  return nodes;
+}
+function treeBar(s, b, pace) {
+  const r = b ? s / b : (s > 0 ? 1.5 : 0);
+  const col = r > 1 ? 'var(--bad)' : (r > pace + .1 && r > .5) ? 'var(--warn)' : 'var(--good)';
+  return `<span class="tr-bar"><i style="width:${Math.min(100, r * 100)}%;background:${col}"></i></span>`;
+}
+function categoryTreeCard(m, byCat, pace) {
+  const nodes = categoryTree(byCat, m);
+  ui.collapsed ||= {};
+  const row = (cls, attrs, lead, label, s, b) => `<div class="tr-row ${cls}" ${attrs}>
+      <span class="tr-lead">${lead}</span><span class="tr-name">${label}</span>
+      <span class="num tr-spent">${money(s, { cents: false })}</span>${treeBar(s, b, pace)}<span class="num tr-budget">${b ? money(b, { cents: false }) : '—'}</span>
+    </div>`;
+  let html = '';
+  for (const n of nodes) {
+    if (n.type === 'single') {
+      html += row('', `data-act="edit-budget" data-id="${n.c.id}"`, `<i class="tr-dot" style="background:hsl(${catHue(n.c.id)} 75% 60%)"></i>`, `${n.c.emoji} ${esc(n.c.name)}`, n.s, n.b);
+    } else {
+      const open = !ui.collapsed[n.name];
+      html += row('tr-parent', `data-act="toggle-parent" data-name="${esc(n.name)}"`, `<span class="tr-caret">${open ? '▾' : '▸'}</span><span class="tr-count">${n.kids.length}</span>`, esc(n.name), n.s, n.b);
+      if (open) html += `<div class="tr-kids">${n.kids.map(k => row('tr-kid', `data-act="edit-budget" data-id="${k.c.id}"`, '', `${k.c.emoji} ${esc(k.c.name)}`, k.s, k.b)).join('')}</div>`;
+    }
+  }
+  return `<section class="card">
+    <div class="tr-row tr-head"><span></span><span class="bgroup-title">Regular categories</span><span>Spent</span><span></span><span>Budget</span></div>
+    ${html}
+  </section>`;
+}
+
 /* ---------- Goals ---------- */
 function goalSaved(g) { return (g.start || 0) + g.contributions.reduce((s, c) => s + c.amount, 0); }
 function renderGoals() {
@@ -1422,6 +1683,16 @@ function renderSettings() {
     ${widgetSettingsCard()}
 
     <section class="card">
+      <div class="card-head"><h2>🧭 Import from Copilot</h2></div>
+      <p class="faint">Brings in your Copilot categories and older history, then shows month by month whether Copilot and Tally agree.</p>
+      <ol class="steps">
+        <li><b>iPhone:</b> Copilot → Settings → Account → <i>Export your transactions</i> → save the CSV to Files.<br><b>Mac:</b> Transactions → select all → Export.</li>
+        <li>Choose the file below, check the account matches, and import.</li>
+      </ol>
+      <label class="btn primary"><input type="file" accept=".csv,text/csv" id="copilot-file" hidden>Choose Copilot export…</label>
+    </section>
+
+    <section class="card">
       <div class="card-head"><h2>Import a CSV statement</h2></div>
       <p class="faint">Works with Apple Card exports and any bank’s CSV download. Duplicates are skipped.</p>
       <label class="btn"><input type="file" accept=".csv,text/csv" id="csv-file" hidden>Choose CSV file…</label>
@@ -1454,6 +1725,9 @@ function openModal(html, onOk, onOpen, onAlt) {
   const first = form.querySelector('input:not([type=checkbox]):not([type=hidden]), select, textarea');
   if (first && window.matchMedia('(pointer:fine)').matches) first.focus();
 }
+$('#modal-form').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.closest('.newcat')) { e.preventDefault(); addCatFromPicker(e.currentTarget); }
+});
 $('#modal-form').addEventListener('submit', e => {
   const btn = e.submitter;
   const v = btn ? btn.value : 'ok';
@@ -1468,7 +1742,12 @@ $('#modal-form').addEventListener('submit', e => {
   }
 });
 $('#modal-form').addEventListener('click', e => {
-  const b = e.target.closest('.cat-opt');
+  const form = e.currentTarget;
+  // Inline "new category" inside the category picker
+  if (e.target.closest('[data-newcat]')) { e.preventDefault(); showNewCat(form, true); return; }
+  if (e.target.closest('[data-nc-cancel]')) { e.preventDefault(); showNewCat(form, false); return; }
+  if (e.target.closest('[data-nc-add]')) { e.preventDefault(); addCatFromPicker(form); return; }
+  const b = e.target.closest('.cat-opt:not([data-newcat])');
   if (b) {
     e.preventDefault();
     $$('.cat-opt', e.currentTarget).forEach(x => x.classList.toggle('active', x === b));
@@ -1482,7 +1761,54 @@ $('#modal-form').addEventListener('click', e => {
 function catPicker(current, { includeSystem = true } = {}) {
   const cats = includeSystem ? allCategories() : state.categories;
   return `<input type="hidden" name="category" value="${esc(current)}">
-    <div class="cat-grid">${cats.map(c => `<button type="button" class="cat-opt ${c.id === current ? 'active' : ''}" data-cat="${c.id}">${c.emoji} ${esc(c.name)}</button>`).join('')}</div>`;
+    <div class="cat-grid">${cats.map(c => `<button type="button" class="cat-opt ${c.id === current ? 'active' : ''}" data-cat="${c.id}">${c.emoji} ${esc(c.name)}</button>`).join('')}
+</div>
+    <button type="button" class="link-btn new-cat" data-newcat>＋ New category</button>
+    <div class="newcat" hidden>
+      <div class="row">
+        <label class="field" style="flex:0 0 64px"><span>Emoji</span><input class="input" data-nc="emoji" value="🏷️" maxlength="4"></label>
+        <label class="field"><span>Name</span><input class="input" data-nc="name" placeholder="e.g. Pets"></label>
+      </div>
+      <div class="row">
+        <label class="field"><span>Parent category</span><select class="input" data-nc="group">
+          <option value="">None</option>
+          ${parentNames().map(g => `<option value="${esc(g)}">${esc(g)}</option>`).join('')}
+          <option value="__excluded">Excluded (not in budget)</option>
+        </select></label>
+        <label class="field"><span>Monthly budget</span><input class="input" data-nc="budget" type="number" min="0" step="1" placeholder="0"></label>
+      </div>
+      <div class="btn-row" style="justify-content:flex-end"><button type="button" class="btn small" data-nc-cancel>Cancel</button><button type="button" class="btn small primary" data-nc-add>Add category</button></div>
+    </div>`;
+}
+function showNewCat(form, show) {
+  const box = $('.newcat', form);
+  box.hidden = !show;
+  $('[data-newcat]', form).hidden = show;
+  if (show) { $('[data-nc="name"]', box).focus(); box.scrollIntoView({ block: 'nearest' }); }
+  else { const g = $('.cat-grid', form); g.scrollTop = g.scrollHeight; }
+}
+function addCatFromPicker(form) {
+  const box = $('.newcat', form);
+  const v = k => $(`[data-nc="${k}"]`, box).value.trim();
+  const name = v('name');
+  if (!name) { $('[data-nc="name"]', box).focus(); toast('Give the category a name'); return; }
+  const existing = state.categories.find(c => c.name.toLowerCase() === name.toLowerCase());
+  let c = existing;
+  if (!c) {
+    const excluded = v('group') === '__excluded';
+    c = excluded
+      ? { id: 'c-' + uid(), name, emoji: v('emoji') || '🏷️', group: 'Excluded', budget: 0, excluded: true }
+      : { id: 'c-' + uid(), name, emoji: v('emoji') || '🏷️', group: v('group'), budget: Math.max(0, +v('budget') || 0) };
+    state.categories.push(c);
+    save();
+    const btn = document.createElement('button');
+    btn.type = 'button'; btn.className = 'cat-opt'; btn.dataset.cat = c.id; btn.textContent = `${c.emoji} ${c.name}`;
+    $('.cat-grid', form).appendChild(btn);
+    toast(`Added “${c.name}”`);
+  }
+  showNewCat(form, false);
+  box.querySelectorAll('[data-nc="name"], [data-nc="budget"]').forEach(i => i.value = '');
+  $(`.cat-opt[data-cat="${c.id}"]`, form).click();
 }
 
 function editTxn(id) {
@@ -1629,7 +1955,7 @@ function editBudget(catId) {
       <label class="field"><span>Name</span><input class="input" name="name" value="${esc(c.name)}" required></label>
       <label class="field" style="flex:0 0 80px"><span>Emoji</span><input class="input" name="emoji" value="${esc(c.emoji)}" maxlength="4"></label>
     </div>
-    <label class="field"><span>Group</span><input class="input" name="group" value="${esc(c.group)}" list="group-list"><datalist id="group-list">${GROUP_ORDER.map(g => `<option value="${g}">`).join('')}</datalist></label>
+    <label class="field"><span>Parent category</span><input class="input" name="group" value="${esc(c.excluded ? '' : c.group || '')}" list="group-list" placeholder="None — stands on its own"><datalist id="group-list">${parentNames().map(g => `<option value="${esc(g)}">`).join('')}</datalist></label>
     ${recent.length ? `<div class="field"><span>${monthLabel(m)}</span><div class="txn-list">${recent.map(txnRow).join('')}</div></div>` : ''}
     <div class="modal-actions">
       <button class="btn danger" value="delete" formnovalidate>Delete category</button><span class="spacer"></span>
@@ -1644,7 +1970,7 @@ function editBudget(catId) {
       if (f.scope === 'month') { (state.budgetOverrides[m] ||= {})[catId] = amt; }
       else { c.budget = amt; for (const k in state.budgetOverrides) delete state.budgetOverrides[k][catId]; }
       c.name = f.name.trim(); c.emoji = f.emoji.trim() || c.emoji;
-      c.group = !f.group.trim() || f.group.trim() === 'Excluded' ? 'Other' : f.group.trim();
+      c.group = f.group.trim() === 'Excluded' ? '' : f.group.trim();
       save(); render();
     }, form => {
       const sync = () => { const ex = form.excluded.checked; $('#budget-fields', form).hidden = ex; form.group.closest('.field').hidden = ex; };
@@ -1671,14 +1997,14 @@ function addCategory(excluded = false) {
     </div>
     <div class="row">
       ${excluded ? '' : `<label class="field"><span>Monthly budget</span><input class="input" name="amount" type="number" min="0" step="1" required></label>
-      <label class="field"><span>Group</span><input class="input" name="group" value="Lifestyle" list="group-list2">`}${excluded ? '' : `<datalist id="group-list2">${GROUP_ORDER.map(g => `<option value="${g}">`).join('')}</datalist></label>`}
+      <label class="field"><span>Parent category</span><input class="input" name="group" value="" list="group-list2" placeholder="None">`}${excluded ? '' : `<datalist id="group-list2">${parentNames().map(g => `<option value="${esc(g)}">`).join('')}</datalist></label>`}
     </div>
     <div class="modal-actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="ok">Add</button></div>`,
     form => {
       const f = Object.fromEntries(new FormData(form));
       state.categories.push(excluded
         ? { id: 'c-' + uid(), name: f.name.trim(), emoji: f.emoji.trim() || '🏷️', group: 'Excluded', budget: 0, excluded: true }
-        : { id: 'c-' + uid(), name: f.name.trim(), emoji: f.emoji.trim() || '🏷️', group: f.group.trim() || 'Other', budget: Math.max(0, +f.amount) });
+        : { id: 'c-' + uid(), name: f.name.trim(), emoji: f.emoji.trim() || '🏷️', group: (f.group || '').trim(), budget: Math.max(0, +f.amount) });
       save(); render();
     });
 }
@@ -1899,6 +2225,7 @@ document.addEventListener('click', async e => {
     case 'more-txns': ui.txnLimit += 300; render(); break;
     case 'month': ui.budgetMonth = addMonths(ui.budgetMonth, +el.dataset.d); render(); break;
     case 'edit-budget': editBudget(id); break;
+    case 'toggle-parent': ui.collapsed ||= {}; ui.collapsed[el.dataset.name] = !ui.collapsed[el.dataset.name]; render(); break;
     case 'add-category': addCategory(); break;
     case 'add-excluded': addCategory(true); break;
     case 'show-uncat': ui.tab = 'transactions'; ui.txnFilter = 'uncategorized'; render(); window.scrollTo(0, 0); break;
@@ -1934,6 +2261,7 @@ document.addEventListener('toggle', e => { if (e.target.id === 'widget-details')
 document.addEventListener('change', e => {
   if (e.target.dataset.input === 'txn-account') { ui.txnAccount = e.target.value; ui.txnLimit = 150; render(); }
   if (e.target.id === 'csv-file' && e.target.files[0]) { openCSVImport(e.target.files[0]); e.target.value = ''; }
+  if (e.target.id === 'copilot-file' && e.target.files[0]) { openCopilotImport(e.target.files[0]); e.target.value = ''; }
   if (e.target.id === 'restore-file' && e.target.files[0]) { restoreBackup(e.target.files[0]); e.target.value = ''; }
 });
 $('#btn-sync').addEventListener('click', () => { if (state) syncNow(); });

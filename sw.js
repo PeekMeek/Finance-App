@@ -1,6 +1,6 @@
 // Tally service worker — caches the app shell so it opens offline.
 // Bump CACHE when you change any file so phones pick up the new version.
-const CACHE = 'tally-v1.6.0';
+const CACHE = 'tally-v1.8.0';
 const SHELL = [
   './', 'index.html', 'styles.css', 'app.js', 'manifest.webmanifest',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',
