@@ -349,3 +349,7 @@ body.wide main { max-width: 1280px; }
 .acct-cols { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 6px 28px; }
 .acct-cols .acct-group { margin: 6px 0 0; }
 .chart-tag.flip { transform: translate(calc(-100% - 10px), 8px); }
+
+.ex-row { display: grid; grid-template-columns: 8px 1fr auto; gap: 12px; align-items: center; padding: 10px 0; border-top: 1px solid var(--line); cursor: pointer; }
+.ex-row:first-of-type { border-top: 0; }
+.ex-dot { width: 7px; height: 7px; border-radius: 50%; }

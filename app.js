@@ -8,7 +8,7 @@
    Constants
    ========================================================================= */
 const STORE_KEY = 'tally.v1';
-const APP_VERSION = '1.4.0';
+const APP_VERSION = '1.5.0';
 
 const ACCOUNT_TYPES = {
   checking:   { label: 'Checking',    group: 'cash',   asset: true },
@@ -45,6 +45,7 @@ const DEFAULT_CATEGORIES = [
   { id: 'travel',        name: 'Travel',            emoji: '✈️', group: 'Lifestyle', budget: 150 },
   { id: 'gifts',         name: 'Gifts & giving',    emoji: '🎁', group: 'Lifestyle', budget: 50 },
   { id: 'misc',          name: 'Everything else',   emoji: '📦', group: 'Other',     budget: 100 },
+  { id: 'work',          name: 'Work expenses',     emoji: '💼', group: 'Excluded',  budget: 0, excluded: true },
 ];
 // Not budgeted: money in, money moved between your own accounts, and not-yet-sorted.
 const SYSTEM_CATEGORIES = [
@@ -131,6 +132,7 @@ function loadState() {
       for (const t of st.transactions) if (t.reviewed == null) t.reviewed = t.date < cutoff;
       st.reviewMigrated = true;
     }
+    if (!st.categories.some(c => c.id === 'work')) st.categories.push({ id: 'work', name: 'Work expenses', emoji: '💼', group: 'Excluded', budget: 0, excluded: true });
     return st;
   } catch (e) {
     console.error('Could not load saved data', e);
@@ -259,7 +261,10 @@ function takeSnapshot() {
   if (i >= 0) state.snapshots[i] = snap; else state.snapshots.push(snap);
   state.snapshots.sort((a, b) => a.d.localeCompare(b.d));
 }
+function isExcluded(catId) { return !!cat(catId).excluded; }
+function budgetCategories() { return state.categories.filter(c => !c.excluded); }
 function budgetFor(catId, month) {
+  if (isExcluded(catId)) return 0;
   const o = state.budgetOverrides[month];
   if (o && o[catId] != null) return o[catId];
   return cat(catId).budget || 0;
@@ -271,15 +276,17 @@ function monthTxns(month) {
     return a && !a.hidden && SPENDING_TYPES.has(a.type);
   });
 }
+// byCat holds budgeted spending only; excluded categories (e.g. work expenses) are tallied separately.
 function monthSpending(month) {
-  const byCat = {};
+  const byCat = {}, excluded = {};
   let income = 0;
   for (const t of monthTxns(month)) {
     if (t.category === 'transfer') continue;
     if (t.category === 'income') { income += t.amount; continue; }
-    byCat[t.category] = (byCat[t.category] || 0) - t.amount; // outflow is negative → positive spend
+    const bucket = isExcluded(t.category) ? excluded : byCat;
+    bucket[t.category] = (bucket[t.category] || 0) - t.amount; // outflow is negative → positive spend
   }
-  return { byCat, income };
+  return { byCat, excluded, income };
 }
 
 /* =========================================================================
@@ -718,7 +725,7 @@ function spendingByDay(month) {
   const days = daysInMonth(parseISO(month + '-01'));
   const daily = new Array(days + 1).fill(0);
   for (const t of monthTxns(month)) {
-    if (t.category === 'transfer' || t.category === 'income') continue;
+    if (t.category === 'transfer' || t.category === 'income' || isExcluded(t.category)) continue;
     daily[+t.date.slice(8, 10)] -= t.amount;
   }
   const cum = [0]; for (let d = 1; d <= days; d++) cum[d] = cum[d - 1] + daily[d];
@@ -846,7 +853,7 @@ function reviewCard() {
 function topCategoriesCard() {
   const month = monthKey(new Date());
   const { byCat } = monthSpending(month);
-  const rows = state.categories.map(c => ({ c, s: byCat[c.id] || 0, b: budgetFor(c.id, month) }))
+  const rows = budgetCategories().map(c => ({ c, s: byCat[c.id] || 0, b: budgetFor(c.id, month) }))
     .concat(byCat.uncategorized > 0 ? [{ c: cat('uncategorized'), s: byCat.uncategorized, b: 0 }] : [])
     .filter(r => r.s > 0).sort((a, b) => b.s - a.s).slice(0, 7);
   const pace = new Date().getDate() / daysInMonth();
@@ -1063,7 +1070,9 @@ function renderBudget() {
   const budgeted = state.categories.reduce((s, c) => s + budgetFor(c.id, m), 0);
   const spent = Object.values(byCat).reduce((s, v) => s + v, 0);
   const left = budgeted - spent;
-  const groups = [...new Set([...GROUP_ORDER, ...state.categories.map(c => c.group)])];
+  const groups = [...new Set([...GROUP_ORDER, ...budgetCategories().map(c => c.group)])];
+  const excludedCats = state.categories.filter(c => c.excluded);
+  const { excluded: exSpent } = monthSpending(m);
 
   const catRow = c => {
     const b = budgetFor(c.id, m), s = byCat[c.id] || 0;
@@ -1097,12 +1106,24 @@ function renderBudget() {
     ${renderPayCard(budgeted)}
     ${unc > 0 ? `<div class="note warn">${money(unc, { cents: false })} of spending isn’t categorized yet. <button class="link-btn" data-act="show-uncat">Sort it</button></div>` : ''}
     ${groups.map(g => {
-      const cats = state.categories.filter(c => c.group === g);
+      const cats = budgetCategories().filter(c => c.group === g);
       if (!cats.length) return '';
       const gb = cats.reduce((s, c) => s + budgetFor(c.id, m), 0), gs = cats.reduce((s, c) => s + (byCat[c.id] || 0), 0);
       return `<section class="card"><div class="card-head"><div class="bgroup-title">${esc(g)}</div><span class="faint num">${money(gs, { cents: false })} / ${money(gb, { cents: false })}</span></div>${cats.map(catRow).join('')}</section>`;
     }).join('')}
-    <button class="btn block" data-act="add-category">+ Add category</button>`;
+    <section class="card">
+      <div class="card-head"><div class="bgroup-title">Excluded categories</div><span class="faint num">${money(Object.values(exSpent).reduce((a, b) => a + b, 0), { cents: false })}</span></div>
+      <p class="faint" style="margin:0 0 6px">Tracked, but not counted toward your budget or monthly spending.</p>
+      ${excludedCats.map(c => `<div class="ex-row" data-act="edit-budget" data-id="${c.id}">
+        <span class="ex-dot" style="background:hsl(${catHue(c.id)} 75% 60%)"></span>
+        <span>${c.emoji} ${esc(c.name)}</span>
+        <span class="num"><b>${money(exSpent[c.id] || 0, { cents: false })}</b></span>
+      </div>`).join('') || '<p class="faint">None yet.</p>'}
+    </section>
+    <div class="btn-row">
+      <button class="btn" style="flex:1" data-act="add-category">+ Add category</button>
+      <button class="btn" style="flex:1" data-act="add-excluded">+ Add excluded category</button>
+    </div>`;
 }
 
 /* ---------- Pay vs budget ---------- */
@@ -1360,6 +1381,9 @@ $('#modal-form').addEventListener('click', e => {
     e.preventDefault();
     $$('.cat-opt', e.currentTarget).forEach(x => x.classList.toggle('active', x === b));
     e.currentTarget.querySelector('input[name=category]').value = b.dataset.cat;
+    // Work-type expenses are usually one-offs — don't apply them to every charge from that store.
+    const rem = e.currentTarget.querySelector('input[name=remember]');
+    if (rem) rem.checked = !isExcluded(b.dataset.cat);
   }
 });
 
@@ -1504,8 +1528,9 @@ function editBudget(catId) {
   const recent = state.transactions.filter(t => t.category === catId && t.date.startsWith(m)).slice(0, 8);
   openModal(`
     <h2>${c.emoji} ${esc(c.name)}</h2>
-    <div class="row">
-      <label class="field"><span>Monthly budget</span><input class="input" name="amount" type="number" step="1" min="0" value="${budgetFor(catId, m)}" required></label>
+    <label class="check"><input type="checkbox" name="excluded" ${c.excluded ? 'checked' : ''}> Exclude from budget (e.g. work expenses you get reimbursed for)</label>
+    <div class="row" id="budget-fields" ${c.excluded ? 'hidden' : ''}>
+      <label class="field"><span>Monthly budget</span><input class="input" name="amount" type="number" step="1" min="0" value="${c.excluded ? (c.budget || 0) : budgetFor(catId, m)}"></label>
       <label class="field"><span>Applies to</span><select class="input" name="scope"><option value="all">Every month</option><option value="month">${monthLabel(m)} only</option></select></label>
     </div>
     <div class="row">
@@ -1521,12 +1546,17 @@ function editBudget(catId) {
     </div>`,
     form => {
       const f = Object.fromEntries(new FormData(form));
-      const amt = Math.max(0, +f.amount);
+      c.excluded = !!f.excluded;
+      const amt = Math.max(0, +f.amount || 0);
+      if (c.excluded) { c.name = f.name.trim(); c.emoji = f.emoji.trim() || c.emoji; c.group = 'Excluded'; save(); render(); return; }
       if (f.scope === 'month') { (state.budgetOverrides[m] ||= {})[catId] = amt; }
       else { c.budget = amt; for (const k in state.budgetOverrides) delete state.budgetOverrides[k][catId]; }
-      c.name = f.name.trim(); c.emoji = f.emoji.trim() || c.emoji; c.group = f.group.trim() || 'Other';
+      c.name = f.name.trim(); c.emoji = f.emoji.trim() || c.emoji;
+      c.group = !f.group.trim() || f.group.trim() === 'Excluded' ? 'Other' : f.group.trim();
       save(); render();
     }, form => {
+      const sync = () => { const ex = form.excluded.checked; $('#budget-fields', form).hidden = ex; form.group.closest('.field').hidden = ex; };
+      form.excluded.addEventListener('change', sync); sync();
       form.addEventListener('click', e => { const r = e.target.closest('.txn'); if (r) { e.preventDefault(); $('#modal').close(); editTxn(r.dataset.id); } });
     },
     v => {
@@ -1539,21 +1569,24 @@ function editBudget(catId) {
       }
     });
 }
-function addCategory() {
+function addCategory(excluded = false) {
   openModal(`
-    <h2>New budget category</h2>
+    <h2>${excluded ? 'New excluded category' : 'New budget category'}</h2>
+    ${excluded ? '<p class="faint">Spending here is tracked but never counts toward your budget.</p>' : ''}
     <div class="row">
       <label class="field"><span>Name</span><input class="input" name="name" required placeholder="e.g. Pets"></label>
       <label class="field" style="flex:0 0 80px"><span>Emoji</span><input class="input" name="emoji" value="🏷️" maxlength="4"></label>
     </div>
     <div class="row">
-      <label class="field"><span>Monthly budget</span><input class="input" name="amount" type="number" min="0" step="1" required></label>
-      <label class="field"><span>Group</span><input class="input" name="group" value="Lifestyle" list="group-list2"><datalist id="group-list2">${GROUP_ORDER.map(g => `<option value="${g}">`).join('')}</datalist></label>
+      ${excluded ? '' : `<label class="field"><span>Monthly budget</span><input class="input" name="amount" type="number" min="0" step="1" required></label>
+      <label class="field"><span>Group</span><input class="input" name="group" value="Lifestyle" list="group-list2">`}${excluded ? '' : `<datalist id="group-list2">${GROUP_ORDER.map(g => `<option value="${g}">`).join('')}</datalist></label>`}
     </div>
     <div class="modal-actions"><button class="btn" value="cancel" formnovalidate>Cancel</button><button class="btn primary" value="ok">Add</button></div>`,
     form => {
       const f = Object.fromEntries(new FormData(form));
-      state.categories.push({ id: 'c-' + uid(), name: f.name.trim(), emoji: f.emoji.trim() || '🏷️', group: f.group.trim() || 'Other', budget: Math.max(0, +f.amount) });
+      state.categories.push(excluded
+        ? { id: 'c-' + uid(), name: f.name.trim(), emoji: f.emoji.trim() || '🏷️', group: 'Excluded', budget: 0, excluded: true }
+        : { id: 'c-' + uid(), name: f.name.trim(), emoji: f.emoji.trim() || '🏷️', group: f.group.trim() || 'Other', budget: Math.max(0, +f.amount) });
       save(); render();
     });
 }
@@ -1759,6 +1792,7 @@ document.addEventListener('click', async e => {
     case 'month': ui.budgetMonth = addMonths(ui.budgetMonth, +el.dataset.d); render(); break;
     case 'edit-budget': editBudget(id); break;
     case 'add-category': addCategory(); break;
+    case 'add-excluded': addCategory(true); break;
     case 'show-uncat': ui.tab = 'transactions'; ui.txnFilter = 'uncategorized'; render(); window.scrollTo(0, 0); break;
     case 'add-goal': editGoal(null); break;
     case 'edit-pay': editPay(); break;
