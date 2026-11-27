@@ -8,7 +8,7 @@
    Constants
    ========================================================================= */
 const STORE_KEY = 'tally.v1';
-const APP_VERSION = '1.2.0';
+const APP_VERSION = '1.4.0';
 
 const ACCOUNT_TYPES = {
   checking:   { label: 'Checking',    group: 'cash',   asset: true },
@@ -83,7 +83,8 @@ let state = loadState();
 let ui = {
   tab: 'overview',
   settingsOpen: false,
-  range: '3M',
+  range: '1M',
+  reviewPage: 0,
   txnSearch: '',
   txnAccount: 'all',
   txnFilter: 'all',
@@ -96,6 +97,8 @@ function freshState() {
   return {
     version: 1,
     demo: false,
+    reviewMigrated: true,
+    recurringIgnored: {},
     accounts: [],
     transactions: [],
     categories: DEFAULT_CATEGORIES.map(c => ({ ...c })),
@@ -121,7 +124,14 @@ function loadState() {
     if (!raw) return null;
     const s = JSON.parse(raw);
     const base = freshState();
-    return { ...base, ...s, settings: { ...base.settings, ...(s.settings || {}) } };
+    const st = { ...base, ...s, settings: { ...base.settings, ...(s.settings || {}) } };
+    if (!st.reviewMigrated) {
+      // Everything older than a week counts as already looked at.
+      const cutoff = isoDate(new Date(Date.now() - 7 * 86400000));
+      for (const t of st.transactions) if (t.reviewed == null) t.reviewed = t.date < cutoff;
+      st.reviewMigrated = true;
+    }
+    return st;
   } catch (e) {
     console.error('Could not load saved data', e);
     return null;
@@ -391,7 +401,7 @@ function mergeSimpleFIN(data, windowStart) {
       const existing = state.transactions.find(t => t.id === id);
       if (existing) Object.assign(existing, fields);
       else {
-        const t = { id, source: 'simplefin', note: '', ...fields };
+        const t = { id, source: 'simplefin', note: '', reviewed: false, ...fields };
         t.category = autoCategory(t, a);
         state.transactions.push(t);
         added++;
@@ -541,7 +551,7 @@ function openCSVImport(file) {
           const key = `${date}|${amount}|${desc}`;
           if (existingKeys.has(key)) { skipped++; continue; }
           existingKeys.add(key);
-          const t = { id: 'csv:' + uid(), accountId: a.id, source: 'csv', date, amount, desc, pending: false, note: '' };
+          const t = { id: 'csv:' + uid(), accountId: a.id, source: 'csv', date, amount, desc, pending: false, note: '', reviewed: date < isoDate(new Date(Date.now() - 14 * 86400000)) };
           t.category = autoCategory(t, a);
           state.transactions.push(t);
           added++;
@@ -579,6 +589,7 @@ function loadDemo() {
     const d = new Date(); d.setDate(d.getDate() - daysAgo);
     const t = { id: 'demo:' + uid(), accountId: a.id, source: 'demo', date: isoDate(d), amount: round2(amount), desc, pending, note: '' };
     t.category = autoCategory(t, a);
+    t.reviewed = daysAgo > 4;
     state.transactions.push(t);
   };
   const eat = ['Starbucks', 'Chipotle', 'Panera Bread', 'Culver’s', 'Jet’s Pizza', 'Tim Hortons', 'Sushi Bistro', 'DoorDash'];
@@ -658,6 +669,7 @@ function render() {
   document.body.classList.toggle('privacy', !!state.settings.privacy);
   $$('.tabbar button').forEach(b => b.classList.toggle('active', !ui.settingsOpen && b.dataset.tab === ui.tab));
   $('#page-title').textContent = ui.settingsOpen ? 'Accounts & settings' : TITLES[ui.tab];
+  document.body.classList.toggle('wide', !ui.settingsOpen && ui.tab === 'overview');
   const view = $('#view');
   const demoBanner = state.demo ? `<div class="note warn">You’re looking at sample data. <button class="link-btn" data-act="open-settings">Connect your accounts</button> to replace it.</div>` : '';
   if (ui.settingsOpen) view.innerHTML = renderSettings();
@@ -686,86 +698,287 @@ function renderWelcome() {
 }
 
 /* ---------- Overview ---------- */
-function renderOverview() {
-  if (!state.accounts.length) return emptyAccounts();
+function daysInMonth(d = new Date()) { return new Date(d.getFullYear(), d.getMonth() + 1, 0).getDate(); }
+function addDaysISO(iso, n) { const d = parseISO(iso); d.setDate(d.getDate() + n); return isoDate(d); }
+function daysBetween(a, b) { return Math.round((parseISO(b) - parseISO(a)) / 86400000); }
+function median(arr) { const s = [...arr].sort((x, y) => x - y); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; }
+function catHue(id) {
+  const fixed = { mortgage: 28, utilities: 45, phone: 190, insurance: 210, groceries: 95, 'eating-out': 18, gas: 0, household: 160,
+    shopping: 330, subscriptions: 285, entertainment: 260, health: 140, travel: 200, gifts: 350, misc: 220, income: 140, transfer: 215, uncategorized: 220 };
+  if (fixed[id] != null) return fixed[id];
+  let h = 0; for (const ch of String(id)) h = (h * 37 + ch.charCodeAt(0)) % 360; return h;
+}
+function catPill(id) {
+  const c = cat(id), h = catHue(id);
+  return `<span class="cat-pill" style="--h:${h}">${c.emoji} ${esc(c.name)}</span>`;
+}
+
+// Cumulative budgeted spending by day for a month.
+function spendingByDay(month) {
+  const days = daysInMonth(parseISO(month + '-01'));
+  const daily = new Array(days + 1).fill(0);
+  for (const t of monthTxns(month)) {
+    if (t.category === 'transfer' || t.category === 'income') continue;
+    daily[+t.date.slice(8, 10)] -= t.amount;
+  }
+  const cum = [0]; for (let d = 1; d <= days; d++) cum[d] = cum[d - 1] + daily[d];
+  return { days, cum };
+}
+
+function spendingCard() {
+  const month = monthKey(new Date()), today = new Date().getDate();
+  const budgeted = state.categories.reduce((s, c) => s + budgetFor(c.id, month), 0);
+  const { days, cum } = spendingByDay(month);
+  const spent = cum[today];
+  const left = budgeted - spent;
+  const paceToday = budgeted * today / days;
+  const vsPace = paceToday - spent;
+  const maxY = Math.max(budgeted, spent, 1) * 1.08;
+  const W = 600, H = 190, X = d => d / days * W, Y = v => H - 6 - v / maxY * (H - 16);
+  let segs = '';
+  for (let d = 1; d <= today; d++) {
+    const r = cum[d] / Math.max(1, budgeted * d / days);
+    const col = r <= 1 ? 'var(--good)' : r <= 1.12 ? 'var(--warn)' : 'var(--bad)';
+    segs += `<line x1="${X(d - 1)}" y1="${Y(cum[d - 1])}" x2="${X(d)}" y2="${Y(cum[d])}" stroke="${col}" stroke-width="2.5" vector-effect="non-scaling-stroke" stroke-linecap="round"/>`;
+  }
+  const dotX = X(today) / W * 100, dotY = Y(spent) / H * 100;
+  return `<section class="card ov-card" style="order:1">
+    <div class="ov-head"><h2>Monthly spending</h2><button class="card-link" data-act="goto" data-tab="transactions">Transactions ›</button></div>
+    <div class="ov-center">
+      <div class="ov-big num ${left < 0 ? 'neg' : ''}">${money(Math.abs(left), { cents: false })} ${left < 0 ? 'over' : 'left'}</div>
+      <div class="ov-sub num">${money(spent, { cents: false })} spent of ${money(budgeted, { cents: false })} budgeted</div>
+    </div>
+    <div class="chart" style="height:${H}px">
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+        <line x1="0" y1="${Y(0)}" x2="${W}" y2="${Y(budgeted)}" stroke="var(--ink-3)" stroke-width="1" stroke-dasharray="4 5" vector-effect="non-scaling-stroke"/>
+        ${segs}
+      </svg>
+      <span class="chart-dot" style="left:${dotX}%;top:${dotY}%;--c:${vsPace >= 0 ? 'var(--good)' : 'var(--bad)'}"></span>
+      <span class="chart-tag num ${dotX > 55 ? 'flip' : ''}" style="left:${dotX}%;top:${dotY}%;background:${vsPace >= 0 ? 'var(--good)' : 'var(--bad)'}">${money(Math.abs(vsPace), { cents: false })} ${vsPace >= 0 ? 'under' : 'over'}</span>
+    </div>
+    <div class="faint" style="text-align:center;margin-top:6px">Dotted line = steady pace to spend exactly your budget</div>
+  </section>`;
+}
+
+const NW_RANGES = { '1W': 7, '1M': 30, '3M': 91, YTD: null, '1Y': 365, ALL: 1e5 };
+function nwPoint(s) {
+  const assets = (s.cash || 0) + (s.invest || 0) + (s.other || 0) + (state.settings.includeRetirement ? (s.retire || 0) : 0);
+  return { assets, debt: s.debt || 0, nw: assets - (s.debt || 0) };
+}
+function pctChange(from, to) {
+  if (!from) return null;
+  const p = (to - from) / Math.abs(from) * 100;
+  return Math.max(-999, Math.min(999, p));
+}
+function changeBadge(p, goodWhenUp) {
+  if (p == null || !isFinite(p)) return '';
+  const up = p >= 0, good = up === goodWhenUp;
+  return `<span class="chg ${good ? 'good' : 'bad'}">${up ? '↗' : '↘'} ${Math.abs(p).toFixed(p >= 100 || p <= -100 ? 0 : 1)}%</span>`;
+}
+function netWorthCard() {
   const t = totals();
-  const series = rangeSeries();
-  const first = series[0];
-  const change = first ? t.nw - snapNW(first) : 0;
-  const changePct = first && snapNW(first) ? change / Math.abs(snapNW(first)) * 100 : 0;
-  const parts = [
-    ['cash', t.cash], ['retire', t.retire], ['invest', t.invest], ['other', t.other],
-  ].filter(([, v]) => v > 0);
+  const nowPt = { assets: t.nw + t.debt, debt: t.debt, nw: t.nw };
+  let days = NW_RANGES[ui.range] ?? 91;
+  if (ui.range === 'YTD') days = Math.ceil((Date.now() - new Date(new Date().getFullYear(), 0, 1)) / 86400000);
+  const cutoff = isoDate(new Date(Date.now() - days * 86400000)), todayISO = isoDate(new Date());
+  const pts = state.snapshots.filter(s => s.d >= cutoff && s.d < todayISO).map(nwPoint).concat([nowPt]);
+  const first = pts[0];
+  const W = 600, H = 150;
+  let chart = '<div class="faint" style="text-align:center;padding:50px 0">History builds up as Tally syncs each day</div>';
+  if (pts.length > 1) {
+    const vals = pts.map(p => p.nw), lo = Math.min(...vals), hi = Math.max(...vals);
+    const pad = Math.max((hi - lo) * 0.15, Math.abs(hi) * 0.03, 1), min = lo - pad, span = hi + pad - min;
+    const xy = vals.map((v, i) => [i / (vals.length - 1) * W, H - 8 - (v - min) / span * (H - 20)]);
+    const d = xy.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join('');
+    const last = xy[xy.length - 1];
+    chart = `<div class="chart" style="height:${H}px"><svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
+      <defs><linearGradient id="nwg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="var(--good)" stop-opacity=".28"/><stop offset="1" stop-color="var(--good)" stop-opacity="0"/></linearGradient></defs>
+      <path d="${d}L${W},${H}L0,${H}Z" fill="url(#nwg)" stroke="none"/>
+      <path d="${d}" fill="none" stroke="var(--good)" stroke-width="2.5" vector-effect="non-scaling-stroke"/></svg>
+      <span class="chart-dot" style="left:${last[0] / W * 100}%;top:${last[1] / H * 100}%;--c:var(--good)"></span></div>`;
+  }
+  return `<section class="card ov-card" style="order:2">
+    <div class="ov-head"><h2>Net worth</h2><button class="card-link" data-act="scroll-accounts">Accounts ›</button></div>
+    <div class="ov-center"><div class="ov-big num">${money(t.nw, { cents: false })}</div>
+      <div class="ov-sub">${changeBadge(pctChange(first?.nw, t.nw), true)} <span class="faint">${ui.range === 'ALL' ? 'all time' : ui.range === 'YTD' ? 'this year' : 'past ' + ui.range}</span></div></div>
+    <div class="nw-split">
+      <div><div class="k">Assets</div><div class="v num">${money(nowPt.assets, { cents: false })}</div>${changeBadge(pctChange(first?.assets, nowPt.assets), true)}</div>
+      <div><div class="k">Debts</div><div class="v num">${money(t.debt, { cents: false })}</div>${changeBadge(pctChange(first?.debt, t.debt), false)}</div>
+    </div>
+    ${chart}
+    <div class="range-tabs center">${Object.keys(NW_RANGES).map(r => `<button data-range="${r}" class="${ui.range === r ? 'active' : ''}">${r}</button>`).join('')}</div>
+    ${t.retire > 0 ? `<div class="retire-toggle"><span class="faint">${state.settings.includeRetirement ? 'Includes' : 'Not including'} retirement <b class="num">${money(t.retire, { cents: false })}</b></span><button class="btn small" data-act="toggle-retire">${state.settings.includeRetirement ? 'Leave out' : 'Include'}</button></div>` : ''}
+  </section>`;
+}
+
+const REVIEW_PAGE = 5;
+function reviewQueue() {
+  return state.transactions.filter(t => !t.reviewed && acct(t.accountId) && !acct(t.accountId).hidden);
+}
+function reviewCard() {
+  const q = reviewQueue();
+  const pages = Math.max(1, Math.ceil(q.length / REVIEW_PAGE));
+  ui.reviewPage = Math.min(ui.reviewPage || 0, pages - 1);
+  const page = q.slice(ui.reviewPage * REVIEW_PAGE, ui.reviewPage * REVIEW_PAGE + REVIEW_PAGE);
+  let body = '', day = null;
+  for (const t of page) {
+    if (t.date !== day) { day = t.date; body += `<div class="rv-day">${parseISO(t.date).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}</div>`; }
+    body += `<div class="rv-row">
+      <button class="rv-check" data-act="review-one" data-id="${esc(t.id)}" aria-label="Mark reviewed"></button>
+      <div class="rv-main" data-act="edit-txn" data-id="${esc(t.id)}">
+        <span class="rv-name">${esc(prettyDesc(t.desc))}</span><span class="rv-acct">${esc(acctName(acct(t.accountId)))}${t.pending ? ' · pending' : ''}</span>
+      </div>
+      <span class="rv-pill" data-act="edit-txn" data-id="${esc(t.id)}">${catPill(t.category)}</span>
+      <span class="rv-amt num ${t.amount > 0 ? 'pos' : ''}">${money(t.amount)}</span><span class="new-dot"></span>
+    </div>`;
+  }
+  return `<section class="card ov-card" style="order:3">
+    <div class="ov-head"><h2>Transactions to review</h2><button class="card-link" data-act="review-all-list">View all ›</button></div>
+    ${q.length ? body : '<div class="empty" style="padding:28px 0">✨ All caught up. New transactions show up here after each sync.</div>'}
+    ${q.length ? `<div class="rv-foot">
+      <div class="faint">${ui.reviewPage * REVIEW_PAGE + 1}–${ui.reviewPage * REVIEW_PAGE + page.length} of ${q.length}
+        <button class="icon-btn sm" data-act="review-page" data-d="-1" ${ui.reviewPage === 0 ? 'disabled' : ''}>‹</button><button class="icon-btn sm" data-act="review-page" data-d="1" ${ui.reviewPage >= pages - 1 ? 'disabled' : ''}>›</button></div>
+      <button class="btn small outline" data-act="review-page-done">✓ Mark ${page.length} as reviewed</button>
+    </div>` : ''}
+  </section>`;
+}
+
+function topCategoriesCard() {
   const month = monthKey(new Date());
   const { byCat } = monthSpending(month);
-  const spent = Object.entries(byCat).reduce((s, [, v]) => s + v, 0);
-  const budgeted = state.categories.reduce((s, c) => s + budgetFor(c.id, month), 0);
-  const monthPct = new Date().getDate() / new Date(new Date().getFullYear(), new Date().getMonth() + 1, 0).getDate();
+  const rows = state.categories.map(c => ({ c, s: byCat[c.id] || 0, b: budgetFor(c.id, month) }))
+    .concat(byCat.uncategorized > 0 ? [{ c: cat('uncategorized'), s: byCat.uncategorized, b: 0 }] : [])
+    .filter(r => r.s > 0).sort((a, b) => b.s - a.s).slice(0, 7);
+  const pace = new Date().getDate() / daysInMonth();
+  return `<section class="card ov-card" style="order:4">
+    <div class="ov-head"><h2>Top categories</h2><button class="card-link" data-act="goto" data-tab="budget">View all ›</button></div>
+    ${rows.length ? rows.map(({ c, s, b }) => {
+      const r = b ? s / b : 1.5;
+      const col = r > 1 ? 'var(--bad)' : r > pace + .15 ? 'var(--warn)' : 'var(--good)';
+      return `<div class="tc-row" data-act="edit-budget" data-id="${c.id}">
+        <span class="tc-name">${c.emoji} ${esc(c.name)}</span>
+        <span class="num tc-spent">${money(s, { cents: false })}</span>
+        <span class="tc-bar"><i style="width:${Math.min(100, r * 100)}%;background:${col}"></i></span>
+        <span class="num tc-budget">${b ? money(b, { cents: false }) : '—'}</span>
+      </div>`;
+    }).join('') : '<div class="empty" style="padding:20px 0">No spending yet this month.</div>'}
+  </section>`;
+}
 
-  return `
-    <section class="card hero">
-      <div class="card-head">
-        <span class="eyebrow">Net worth${state.settings.includeRetirement ? ' · incl. retirement' : ''}</span>
-        <div class="range-tabs">${['1M', '3M', '1Y', 'All'].map(r => `<button data-range="${r}" class="${ui.range === r ? 'active' : ''}">${r}</button>`).join('')}</div>
-      </div>
-      <div class="big-number num">${money(t.nw, { cents: false })}</div>
-      ${first ? `<div class="delta num ${change >= 0 ? 'pos' : 'neg'}">${change >= 0 ? '▲' : '▼'} ${money(Math.abs(change), { cents: false })} (${Math.abs(changePct).toFixed(1)}%) <span class="faint">over ${rangeLabel()}</span></div>` : `<div class="faint">History builds up as you sync</div>`}
-      <div class="spark">${sparkline(series.map(x => ({ nw: snapNW(x) })).concat([{ nw: t.nw }]))}</div>
-      ${t.retire > 0 ? `<div class="retire-toggle">
-        <span class="faint">${state.settings.includeRetirement ? 'Includes' : 'Not including'} retirement <b class="num">${money(t.retire, { cents: false })}</b></span>
-        <button class="btn small" data-act="toggle-retire">${state.settings.includeRetirement ? 'Leave out' : 'Include'}</button>
-      </div>` : ''}
-    </section>
+// Find charges that repeat on a steady schedule with a steady amount.
+function detectRecurring() {
+  const groups = {};
+  for (const t of state.transactions) {
+    if (t.amount >= 0 || t.pending || t.category === 'transfer' || t.category === 'income') continue;
+    const a = acct(t.accountId); if (!a || a.hidden) continue;
+    const k = merchantKey(t.desc); if (!k) continue;
+    (groups[k] ||= []).push(t);
+  }
+  const out = [];
+  const ignored = state.recurringIgnored || {};
+  for (const [k, list] of Object.entries(groups)) {
+    if (ignored[k]) continue;
+    list.sort((a, b) => a.date.localeCompare(b.date));
+    const dates = [...new Set(list.map(t => t.date))];
+    if (dates.length < 2) continue;
+    const gaps = dates.slice(1).map((d, i) => daysBetween(dates[i], d));
+    const med = median(gaps);
+    let freq = null, step = null;
+    if (med >= 6 && med <= 8 && dates.length >= 3) { freq = 'Weekly'; step = 7; }
+    else if (med >= 13 && med <= 16 && dates.length >= 3) { freq = 'Every 2 weeks'; step = 14; }
+    else if (med >= 26 && med <= 35) { freq = 'Monthly'; step = 'm'; }
+    else if (med >= 85 && med <= 95) { freq = 'Quarterly'; step = 'q'; }
+    else if (med >= 350 && med <= 380) { freq = 'Yearly'; step = 'y'; }
+    if (!freq || gaps.some(g => Math.abs(g - med) > med * 0.35)) continue;
+    const amts = list.map(t => -t.amount), mA = median(amts);
+    if (amts.some(x => Math.abs(x - mA) > Math.max(5, mA * 0.4))) continue;
+    // Seen only twice: trust it only for bill-type categories or an identical amount.
+    const billCats = ['mortgage', 'utilities', 'phone', 'insurance', 'subscriptions'];
+    const lastCat = list[list.length - 1].category;
+    if (dates.length < 3 && !billCats.includes(lastCat) && amts.some(x => Math.abs(x - mA) > mA * 0.03)) continue;
+    // Everyday spending (groceries, gas, eating out…) repeats by habit, not by bill — require a near-identical amount.
+    if (['groceries', 'eating-out', 'gas', 'household', 'shopping', 'health'].includes(lastCat) && amts.some(x => Math.abs(x - mA) > mA * 0.05)) continue;
+    const last = list[list.length - 1];
+    let next;
+    if (typeof step === 'number') next = addDaysISO(last.date, step);
+    else { const d = parseISO(last.date); d.setMonth(d.getMonth() + (step === 'm' ? 1 : step === 'q' ? 3 : 12)); next = isoDate(d); }
+    out.push({ key: k, name: prettyDesc(last.desc), freq, amount: -last.amount, next, category: last.category, last: last.date });
+  }
+  return out.sort((a, b) => a.next.localeCompare(b.next));
+}
+function whenLabel(iso) {
+  const today = isoDate(new Date());
+  if (iso < today) return 'Overdue';
+  if (iso === today) return 'Today';
+  if (iso === addDaysISO(today, 1)) return 'Tomorrow';
+  return parseISO(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+}
+function recurringCard() {
+  const today = isoDate(new Date()), horizon = addDaysISO(today, 14), overdueFrom = addDaysISO(today, -10);
+  const all = detectRecurring();
+  const soon = all.filter(r => r.next >= overdueFrom && r.next <= horizon);
+  const total = soon.reduce((s, r) => s + r.amount, 0);
+  return `<section class="card ov-card" style="order:5">
+    <div class="ov-head"><h2>Next two weeks</h2><button class="card-link" data-act="recurring-list">Recurrings ›</button></div>
+    ${soon.length ? soon.map(r => `<div class="rc-row">
+        <span class="rc-when ${r.next < today ? 'neg' : ''}">${whenLabel(r.next)}</span>
+        <span class="rc-name">${esc(r.name)} <span class="faint">${r.freq}</span></span>
+        <span class="rc-pill">${catPill(r.category)}</span>
+        <span class="num rc-amt">${money(r.amount)}</span>
+      </div>`).join('') + `<div class="rc-total faint">≈ <b class="num">${money(total, { cents: false })}</b> due in the next two weeks</div>`
+      : `<div class="empty" style="padding:20px 0">${all.length ? 'Nothing due in the next two weeks.' : 'Tally spots repeating bills after it has seen them at least twice.'}</div>`}
+  </section>`;
+}
+function openRecurringList() {
+  const all = detectRecurring();
+  const ignored = Object.keys(state.recurringIgnored || {});
+  openModal(`
+    <h2>Recurring payments</h2>
+    <p class="faint">Spotted from charges that repeat on a steady schedule. Tap ✕ if something isn’t really recurring.</p>
+    <div class="txn-list">${all.length ? all.map(r => `<div class="txn" style="cursor:default">
+      <div class="txn-ico">${cat(r.category).emoji}</div>
+      <div style="min-width:0"><div class="txn-desc">${esc(r.name)}</div><div class="txn-meta">${r.freq} · next ${whenLabel(r.next).toLowerCase()}</div></div>
+      <div class="txn-amt num">${money(r.amount)} <button class="link-btn" value="ignore:${esc(r.key)}" formnovalidate title="Not recurring">✕</button></div>
+    </div>`).join('') : '<div class="empty">None found yet.</div>'}</div>
+    ${ignored.length ? `<p class="faint" style="margin-top:10px">${ignored.length} hidden · <button class="link-btn" value="unhide" formnovalidate>Show them again</button></p>` : ''}
+    <div class="modal-actions"><button class="btn primary" value="cancel">Done</button></div>`,
+    null, null,
+    v => {
+      if (v.startsWith('ignore:')) { (state.recurringIgnored ||= {})[v.slice(7)] = true; save(); render(); setTimeout(openRecurringList, 0); }
+      else if (v === 'unhide') { state.recurringIgnored = {}; save(); render(); setTimeout(openRecurringList, 0); }
+    });
+}
 
-    <section class="card">
-      <div class="card-head"><h2>Where it is</h2><span class="faint num">${money(t.assets, { cents: false })} in assets</span></div>
-      <div class="dist-wrap">
-        <div class="donut">${donut(parts.map(([g, v]) => ({ v, color: GROUPS[g].color })), t.assets)}</div>
-        <div class="legend">
-          ${parts.map(([g, v]) => `
-            <div class="legend-item">
-              <span class="sw" style="background:${GROUPS[g].color}"></span>
-              <div><div class="lbl">${GROUPS[g].label}</div><div class="pct">${(v / t.assets * 100).toFixed(1)}% of assets${g === 'retire' && !state.settings.includeRetirement ? ' · not in net worth' : ''}</div></div>
-              <div class="num acct-bal">${money(v, { cents: false })}</div>
-            </div>`).join('')}
-          ${t.debt > 0 ? `
-            <div class="legend-item">
-              <span class="sw" style="background:${GROUPS.debt.color}"></span>
-              <div><div class="lbl">Owed on cards & loans</div><div class="pct">subtracted from net worth</div></div>
-              <div class="num acct-bal neg">−${money(t.debt, { cents: false })}</div>
-            </div>` : ''}
-        </div>
-      </div>
-      ${t.cash > 0 && t.retire > 0 ? `
-        <div class="split-bar"><div style="width:${t.cash / (t.cash + t.retire) * 100}%;background:var(--c-cash)"></div><div style="flex:1;background:var(--c-retire)"></div></div>
-        <div class="faint">Checking & savings vs. retirement: <b class="num">${Math.round(t.cash / (t.cash + t.retire) * 100)}%</b> / <b class="num">${Math.round(t.retire / (t.cash + t.retire) * 100)}%</b></div>` : ''}
-    </section>
-
-    <section class="card" data-act="goto" data-tab="budget" style="cursor:pointer">
-      <div class="card-head"><h2>${new Date().toLocaleDateString('en-US', { month: 'long' })} spending</h2><span class="faint">Budget →</span></div>
-      <div class="row" style="align-items:baseline">
-        <div><span class="num" style="font-size:22px;font-weight:700">${money(spent, { cents: false })}</span> <span class="faint num">of ${money(budgeted, { cents: false })}</span></div>
-        <div style="text-align:right" class="faint num ${spent > budgeted ? 'neg' : ''}">${spent > budgeted ? money(spent - budgeted, { cents: false }) + ' over' : money(budgeted - spent, { cents: false }) + ' left'}</div>
-      </div>
-      <div class="bar ${spent > budgeted ? 'over' : spent / budgeted > monthPct + .1 ? 'near' : ''}" style="margin-top:8px"><i style="width:${Math.min(100, budgeted ? spent / budgeted * 100 : 0)}%"></i><span class="tick" style="left:${monthPct * 100}%"></span></div>
-    </section>
-
-    <div class="section-title"><h2>Accounts</h2><button class="btn small" data-act="open-settings">Manage</button></div>
+function accountsCard() {
+  const t = totals();
+  return `<section class="card ov-card ov-wide" id="accounts-card" style="order:6">
+    <div class="ov-head"><h2>Accounts</h2><button class="card-link" data-act="open-settings">Manage ›</button></div>
+    ${t.cash > 0 && t.retire > 0 ? `<div class="split-bar"><div style="width:${t.cash / (t.cash + t.retire) * 100}%;background:var(--c-cash)"></div><div style="flex:1;background:var(--c-retire)"></div></div>
+      <div class="pay-legend" style="margin-bottom:10px"><span><i style="background:var(--c-cash)"></i>Checking & savings <b class="num">${money(t.cash, { cents: false })}</b></span><span><i style="background:var(--c-retire)"></i>Retirement <b class="num">${money(t.retire, { cents: false })}</b>${state.settings.includeRetirement ? '' : ' · not in net worth'}</span></div>` : ''}
+    <div class="acct-cols">
     ${['cash', 'debt', 'retire', 'invest', 'other'].map(g => {
       const list = visibleAccounts().filter(a => ACCOUNT_TYPES[a.type].group === g);
       if (!list.length) return '';
       const sum = list.reduce((s, a) => s + a.balance, 0);
-      return `<section class="card acct-group">
-        <div class="card-head"><h3>${GROUPS[g].label}</h3><span class="num faint">${money(sum, { cents: false })}</span></div>
-        ${list.map(acctRow).join('')}
-      </section>`;
-    }).join('')}`;
+      return `<div class="acct-group"><div class="card-head"><h3>${GROUPS[g].label}</h3><span class="num faint">${money(sum, { cents: false })}</span></div>${list.map(acctRow).join('')}</div>`;
+    }).join('')}
+    </div>
+  </section>`;
+}
+
+function renderOverview() {
+  if (!state.accounts.length) return emptyAccounts();
+  return `<div class="ov-grid">
+    <div class="ov-col">${spendingCard()}${reviewCard()}</div>
+    <div class="ov-col">${netWorthCard()}${topCategoriesCard()}${recurringCard()}</div>
+    ${accountsCard()}
+  </div>`;
 }
 function acctRow(a) {
   const sub = [a.org, ACCOUNT_TYPES[a.type].label, a.source === 'csv' ? 'CSV import' : a.source === 'manual' ? 'Manual' : a.balanceDate ? 'updated ' + timeAgo(a.balanceDate) : ''].filter(Boolean).join(' · ');
   return `<div class="acct" data-act="edit-account" data-id="${a.id}" style="cursor:pointer">
     <div class="acct-logo" style="background:${orgColor(a.org || a.name)}">${esc(initials(a.org || a.name))}</div>
-    <div><div class="acct-name">${esc(acctName(a))}</div><div class="acct-sub">${esc(sub)}</div></div>
+    <div style="min-width:0"><div class="acct-name">${esc(acctName(a))}</div><div class="acct-sub">${esc(sub)}</div></div>
     <div class="acct-bal num ${a.balance < 0 ? 'neg' : ''}">${money(a.balance)}</div>
   </div>`;
 }
@@ -777,41 +990,6 @@ function emptyAccounts() {
     <div class="btn-row" style="justify-content:center"><button class="btn primary" data-act="open-settings">Add accounts</button><button class="btn" data-act="start-demo">Try sample data</button></div>
   </div>`;
 }
-function rangeLabel() { return { '1M': 'the last month', '3M': 'the last 3 months', '1Y': 'the last year', All: 'all time' }[ui.range]; }
-function rangeSeries() {
-  const days = { '1M': 30, '3M': 91, '1Y': 365, All: 1e5 }[ui.range];
-  const cutoff = isoDate(new Date(Date.now() - days * 86400000));
-  const today = isoDate(new Date());
-  return state.snapshots.filter(s => s.d >= cutoff && s.d < today);
-}
-function sparkline(points) {
-  if (points.length < 2) return '';
-  const W = 600, H = 90, vals = points.map(p => p.nw);
-  const min = Math.min(...vals), max = Math.max(...vals), span = max - min || 1;
-  const xy = vals.map((v, i) => [i / (vals.length - 1) * W, H - 6 - (v - min) / span * (H - 14)]);
-  const d = xy.map(([x, y], i) => `${i ? 'L' : 'M'}${x.toFixed(1)},${y.toFixed(1)}`).join('');
-  const up = vals[vals.length - 1] >= vals[0];
-  const c = up ? 'var(--good)' : 'var(--bad)';
-  return `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">
-    <defs><linearGradient id="sg" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="${c}" stop-opacity=".22"/><stop offset="1" stop-color="${c}" stop-opacity="0"/></linearGradient></defs>
-    <path d="${d}L${W},${H}L0,${H}Z" fill="url(#sg)" stroke="none"/>
-    <path d="${d}" fill="none" stroke="${c}" stroke-width="2" vector-effect="non-scaling-stroke"/>
-  </svg>`;
-}
-function donut(parts, total) {
-  const r = 58, C = 2 * Math.PI * r;
-  let off = 0;
-  const gap = parts.length > 1 ? 3 : 0;
-  const segs = parts.map(p => {
-    const len = Math.max(0, p.v / total * C - gap);
-    const s = `<circle cx="75" cy="75" r="${r}" fill="none" stroke="${p.color}" stroke-width="18" stroke-dasharray="${len} ${C - len}" stroke-dashoffset="${-off}" transform="rotate(-90 75 75)"/>`;
-    off += p.v / total * C;
-    return s;
-  }).join('');
-  return `<svg viewBox="0 0 150 150"><circle cx="75" cy="75" r="${r}" fill="none" stroke="var(--surface-2)" stroke-width="18"/>${segs}
-    <text x="75" y="70" text-anchor="middle" font-size="11" fill="var(--ink-3)" stroke="none" font-weight="600">ASSETS</text>
-    <text x="75" y="90" text-anchor="middle" font-size="17" fill="var(--ink)" stroke="none" font-weight="700" class="num">${compact(total)}</text></svg>`;
-}
 
 /* ---------- Transactions ---------- */
 function filteredTxns() {
@@ -821,6 +999,7 @@ function filteredTxns() {
     if (!a || a.hidden) return false;
     if (ui.txnAccount !== 'all' && t.accountId !== ui.txnAccount) return false;
     if (ui.txnFilter === 'pending' && !t.pending) return false;
+    if (ui.txnFilter === 'review' && t.reviewed) return false;
     if (ui.txnFilter === 'uncategorized' && t.category !== 'uncategorized') return false;
     if (ui.txnFilter === 'income' && t.category !== 'income') return false;
     if (ui.txnFilter === 'spending' && (t.amount >= 0 || ['transfer', 'income'].includes(t.category))) return false;
@@ -845,7 +1024,7 @@ function renderTransactions() {
       </select>
     </div>
     <div class="chips">
-      ${[['all', 'All'], ['spending', 'Spending'], ['income', 'Income'], ['pending', 'Pending'], ['uncategorized', `Needs category${uncategorized ? ` (${uncategorized})` : ''}`]].map(([k, l]) => `<button class="chip ${ui.txnFilter === k ? 'active' : ''}" data-act="txn-filter" data-f="${k}">${l}</button>`).join('')}
+      ${[['all', 'All'], ['review', `To review${reviewQueue().length ? ` (${reviewQueue().length})` : ''}`], ['spending', 'Spending'], ['income', 'Income'], ['pending', 'Pending'], ['uncategorized', `Needs category${uncategorized ? ` (${uncategorized})` : ''}`]].map(([k, l]) => `<button class="chip ${ui.txnFilter === k ? 'active' : ''}" data-act="txn-filter" data-f="${k}">${l}</button>`).join('')}
       <button class="chip" data-act="add-txn">+ Add</button>
     </div>`;
   if (!shown.length) return html + `<div class="empty">No transactions match.</div>`;
@@ -871,7 +1050,7 @@ function txnRow(t) {
       <div class="txn-desc">${esc(prettyDesc(t.desc))}</div>
       <div class="txn-meta">${t.pending ? '<span class="pill pending">Pending</span>' : ''}<span>${esc(c.name)}</span><span>·</span><span>${esc(acctName(a))}</span>${t.note ? `<span>· ${esc(t.note)}</span>` : ''}</div>
     </div>
-    <div class="txn-amt num ${t.amount > 0 ? 'pos' : ''}">${money(t.amount, { sign: true })}</div>
+    <div class="txn-amt num ${t.amount > 0 ? 'pos' : ''}">${money(t.amount, { sign: true })}${t.reviewed ? '' : ' <span class="new-dot"></span>'}</div>
   </div>`;
 }
 
@@ -1067,6 +1246,15 @@ function goalCard(g) {
       <div style="min-width:0"><div class="goal-emoji">${esc(g.emoji || '🎯')}</div><h3>${esc(g.name)}</h3></div>
     </div>
     <div class="goal-stats"><span class="num"><b style="color:var(--ink)">${money(saved, { cents: false })}</b> saved</span><span class="num">of ${money(g.target, { cents: false })}</span></div>
+    ${g.yearly > 0 ? (() => {
+      const yr = String(new Date().getFullYear());
+      const ytd = g.contributions.filter(c => c.date.startsWith(yr)).reduce((x, c) => x + c.amount, 0);
+      const r = Math.max(0, Math.min(1, ytd / g.yearly));
+      return `<div>
+        <div class="goal-stats" style="margin-bottom:5px"><span>${yr} target</span><span class="num"><b style="color:var(--ink)">${money(ytd, { cents: false })}</b> of ${money(g.yearly, { cents: false })}</span></div>
+        <div class="bar ${ytd >= g.yearly ? '' : ''}"><i style="width:${r * 100}%"></i></div>
+      </div>`;
+    })() : ''}
     ${hint ? `<div class="goal-hint">${hint}</div>` : ''}
     <button class="btn primary small" data-act="contribute" data-id="${g.id}">+ Contribute</button>
   </section>`;
@@ -1205,7 +1393,7 @@ function editTxn(id) {
     form => {
       const f = Object.fromEntries(new FormData(form));
       const changed = f.category !== t.category;
-      t.category = f.category; t.note = f.note.trim();
+      t.category = f.category; t.note = f.note.trim(); t.reviewed = true;
       if (editable) { t.desc = f.desc.trim(); t.amount = round2(+f.amount); t.date = f.date; }
       if (f.remember && changed) {
         const key = merchantKey(t.desc);
@@ -1245,7 +1433,7 @@ function addTxn() {
     form => {
       const f = Object.fromEntries(new FormData(form));
       const amt = Math.abs(+f.amount) * (f.dir === 'out' ? -1 : 1);
-      state.transactions.push({ id: 'man:' + uid(), accountId: f.account, source: 'manual', date: f.date, amount: round2(amt), desc: f.desc.trim(), pending: false, note: '', category: f.category });
+      state.transactions.push({ id: 'man:' + uid(), accountId: f.account, source: 'manual', date: f.date, amount: round2(amt), desc: f.desc.trim(), pending: false, note: '', category: f.category, reviewed: true });
       sortTxns(); save(); render();
     });
 }
@@ -1384,9 +1572,9 @@ function editGoal(id) {
     </div>
     <div class="row">
       <label class="field"><span>Monthly contribution</span><input class="input" name="monthly" type="number" step="1" min="0" value="${g?.monthly ?? ''}" placeholder="e.g. 250"></label>
-      <label class="field"><span>Already saved</span><input class="input" name="start" type="number" step="0.01" value="${g?.start ?? 0}"></label>
+      <label class="field"><span>Target yearly amount</span><input class="input" name="yearly" type="number" step="1" min="0" value="${g?.yearly ?? ''}" placeholder="e.g. 3000"></label>
     </div>
-    <p class="faint" id="goal-monthly-hint" style="margin-top:-4px">At the end of each month Tally asks whether to add your monthly contribution.</p>
+    <p class="faint" id="goal-monthly-hint" style="margin-top:-4px">Fill in either one and Tally works out the other. At the end of each month it asks whether to add your monthly contribution.</p>
     ${g && g.contributions.length ? `<div class="field"><span>Contributions</span><div class="txn-list">${[...g.contributions].reverse().map(c => `<div class="txn" style="cursor:default"><div class="txn-ico">${c.amount >= 0 ? '➕' : '➖'}</div><div><div class="txn-desc">${dayLabel(c.date)}</div>${c.note ? `<div class="txn-meta">${esc(c.note)}</div>` : ''}</div><div class="txn-amt num ${c.amount >= 0 ? 'pos' : 'neg'}">${money(c.amount, { sign: true })} <button class="link-btn" value="rm:${c.id}" formnovalidate title="Remove">✕</button></div></div>`).join('')}</div></div>` : ''}
     <div class="modal-actions">
       ${g ? '<button class="btn danger" value="delete" formnovalidate>Delete goal</button><span class="spacer"></span>' : ''}
@@ -1395,10 +1583,16 @@ function editGoal(id) {
     </div>`,
     form => {
       const f = Object.fromEntries(new FormData(form));
-      const data = { emoji: f.emoji.trim() || '🎯', name: f.name.trim(), target: +f.target, due: f.due || null, start: +f.start || 0, monthly: Math.max(0, +f.monthly || 0) };
+      const data = { emoji: f.emoji.trim() || '🎯', name: f.name.trim(), target: +f.target, due: f.due || null, monthly: Math.max(0, +f.monthly || 0), yearly: Math.max(0, +f.yearly || 0) };
       if (g) Object.assign(g, data); else state.goals.push({ id: uid(), contributions: [], promptedThrough: addMonths(monthKey(new Date()), -1), ...data });
       save(); render();
-    }, null,
+    },
+    form => {
+      // Typing in one box fills the other until you edit it yourself.
+      let mAuto = !g?.monthly, yAuto = !g?.yearly;
+      form.monthly.addEventListener('input', () => { mAuto = false; if (yAuto) form.yearly.value = form.monthly.value ? Math.round(+form.monthly.value * 12) : ''; });
+      form.yearly.addEventListener('input', () => { yAuto = false; if (mAuto) form.monthly.value = form.yearly.value ? Math.round(+form.yearly.value / 12) : ''; });
+    },
     v => {
       if (v === 'delete') {
         if (!confirmInline(`Delete “${g.name}”?`)) return false;
@@ -1568,6 +1762,15 @@ document.addEventListener('click', async e => {
     case 'show-uncat': ui.tab = 'transactions'; ui.txnFilter = 'uncategorized'; render(); window.scrollTo(0, 0); break;
     case 'add-goal': editGoal(null); break;
     case 'edit-pay': editPay(); break;
+    case 'review-one': { const t = state.transactions.find(x => x.id === id); if (t) { t.reviewed = true; save(); render(); } break; }
+    case 'review-page': ui.reviewPage = Math.max(0, (ui.reviewPage || 0) + +el.dataset.d); render(); break;
+    case 'review-page-done': {
+      const q = reviewQueue().slice(ui.reviewPage * REVIEW_PAGE, ui.reviewPage * REVIEW_PAGE + REVIEW_PAGE);
+      q.forEach(t => t.reviewed = true); save(); render(); toast(`Marked ${q.length} as reviewed`); break;
+    }
+    case 'review-all-list': ui.tab = 'transactions'; ui.txnFilter = 'review'; render(); window.scrollTo(0, 0); break;
+    case 'scroll-accounts': $('#accounts-card')?.scrollIntoView({ behavior: 'smooth', block: 'start' }); break;
+    case 'recurring-list': openRecurringList(); break;
     case 'edit-goal': editGoal(id); break;
     case 'contribute': contribute(id); break;
     case 'export': exportBackup(); break;
